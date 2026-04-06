@@ -346,17 +346,39 @@ class RADSegEncoder(ImageSemSegEncoder):
         else:
             return seg_probs
 
+    # @override
+    # def align_spatial_features_with_language(self, features: torch.FloatTensor,
+    #                                          onehot: bool = True):
+    #     if self.lang_adaptor is None:
+    #         raise ValueError("Cannot align to language without a lang model")
+    #     if not self.return_radio_features or (self.predict and onehot):
+    #         return features
+    #     B, C, H, W = features.shape
+    #     features = features.permute(0, 2, 3, 1).reshape(B, -1, C)
+    #     with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
+    #         out = self.lang_adaptor.head_mlp(features)
+    #     return out.permute(0, 2, 1).reshape(B, -1, H, W)
+
     @override
     def align_spatial_features_with_language(self, features: torch.FloatTensor,
-                                             onehot: bool = True):
+                                             onehot: bool = True,
+                                             use_feat_mlp: bool = False):  # ← 新增参数
         if self.lang_adaptor is None:
             raise ValueError("Cannot align to language without a lang model")
         if not self.return_radio_features or (self.predict and onehot):
             return features
+
         B, C, H, W = features.shape
         features = features.permute(0, 2, 3, 1).reshape(B, -1, C)
+
         with torch.autocast("cuda", dtype=torch.float16, enabled=self.amp):
-            out = self.lang_adaptor.head_mlp(features)
+            # feat_mlp: 为空间/dense 任务设计
+            # head_mlp: 为全局分类任务设计
+            if use_feat_mlp and hasattr(self.lang_adaptor, 'feat_mlp'):
+                out = self.lang_adaptor.feat_mlp(features)
+            else:
+                out = self.lang_adaptor.head_mlp(features)
+
         return out.permute(0, 2, 1).reshape(B, -1, H, W)
 
     def _get_sam_spatial_features(self, features: torch.FloatTensor):
