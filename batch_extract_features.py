@@ -131,6 +131,8 @@ if __name__ == "__main__":
                     "clusters": clusters
                 }
                 f.write(json.dumps(data) + '\n')
+                # 显式清理缓存，防止显存碎片堆积
+                torch.cuda.empty_cache()
             except Exception as e:
                 print(f"Error processing {img_name}: {e}")
                 
