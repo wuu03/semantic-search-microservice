@@ -113,10 +113,26 @@ if __name__ == "__main__":
     # 但我们开启 num_workers=8 提前在内存里准备好下一张图
     dataloader = DataLoader(dataset, batch_size=1, num_workers=8, pin_memory=True, shuffle=False)
     
-    # Process images and append to jsonl
-    with open(args.output_file, 'w') as f:
+    # --- 断点续传逻辑 ---
+    processed_ids = set()
+    if os.path.exists(args.output_file):
+        with open(args.output_file, 'r') as rf:
+            for line in rf:
+                try:
+                    processed_ids.add(json.loads(line)["image_id"])
+                except:
+                    continue
+        print(f"Resuming: {len(processed_ids)} images already processed. Skipping them.")
+
+    # 使用 'a' (append) 模式打开，确保可以追加写入
+    with open(args.output_file, 'a') as f:
         for tensor, img_names, valid_flags in tqdm(dataloader):
             img_name = img_names[0]
+            
+            # 如果已经处过，直接跳过
+            if img_name in processed_ids:
+                continue
+                
             is_valid = valid_flags[0].item()
             
             if not is_valid:
@@ -124,14 +140,15 @@ if __name__ == "__main__":
                 continue
                 
             try:
-                # 传入没添加额外 batch 维度的原tensor因为 dataloader 已经给我们升了一维 (B=1,C,H,W)
                 clusters = extractor.process_tensor(tensor)
                 data = {
                     "image_id": img_name,
                     "clusters": clusters
                 }
                 f.write(json.dumps(data) + '\n')
-                # 显式清理缓存，防止显存碎片堆积
+                # 强制刷新缓存到硬盘，保证每一条数据都即时保存
+                f.flush()
+                # 显式清理缓存
                 torch.cuda.empty_cache()
             except Exception as e:
                 print(f"Error processing {img_name}: {e}")
