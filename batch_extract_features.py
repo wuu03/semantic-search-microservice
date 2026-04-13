@@ -57,10 +57,9 @@ class FeatureBatchExtractor:
     def process_tensor(self, img_tensor):
         img_tensor = img_tensor.to(self.device)
         
-        # 核心加速：使用半精度计算（借用 V100 的 Tensor Cores，速度翻倍！）
-        with torch.autocast(device_type=self.device, dtype=torch.float16):
-            scga_feat = self.radseg.encode_image_to_feat_map(img_tensor)
-            visual_aligned = self.radseg.align_spatial_features_with_language(scga_feat, onehot=False)
+        # Extract dense features (without autocast to avoid Half/Float mismatch in model buffers)
+        scga_feat = self.radseg.encode_image_to_feat_map(img_tensor)
+        visual_aligned = self.radseg.align_spatial_features_with_language(scga_feat, onehot=False)
             
         B, C, H_f, W_f = visual_aligned.shape
         dense_flat = visual_aligned.permute(0, 2, 3, 1).reshape(-1, C)
