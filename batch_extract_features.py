@@ -57,7 +57,7 @@ class FeatureBatchExtractor:
     def process_tensor(self, img_tensor):
         img_tensor = img_tensor.to(self.device)
         
-        # Extract dense features (without autocast to avoid Half/Float mismatch in model buffers)
+        # Extract dense features
         scga_feat = self.radseg.encode_image_to_feat_map(img_tensor)
         visual_aligned = self.radseg.align_spatial_features_with_language(scga_feat, onehot=False)
             
@@ -65,10 +65,16 @@ class FeatureBatchExtractor:
         dense_flat = visual_aligned.permute(0, 2, 3, 1).reshape(-1, C)
         dense_flat = F.normalize(dense_flat, dim=-1)
         
-        # Get cluster centers (size: num_clusters * C)
+        # Get cluster centers
         centers, labels = spherical_kmeans(dense_flat, num_clusters=self.num_clusters)
-        # return the centers purely like search_demo.py (it relies on K centers)
-        return centers.cpu().numpy().tolist()
+        
+        # 返回两样东西：
+        # 1. clusters: List[List[float]] — 给 ES 索引用
+        # 2. label_map: np.ndarray (H_f, W_f) uint8 — 给可视化用
+        clusters = centers.cpu().numpy().tolist()
+        label_map = labels.cpu().numpy().reshape(H_f, W_f).astype('uint8')
+        
+        return clusters, label_map
 
 class FastImageDataset(Dataset):
     def __init__(self, image_paths, transform):
