@@ -3,3 +3,7 @@ images/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 images/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
 images/**/*.png filter=lfs diff=lfs merge=lfs -text
 *.pth filter=lfs diff=lfs merge=lfs -text
+coco_data/val2017/*.jpg filter=lfs diff=lfs merge=lfs -text
+coco_data/val2017/*.jpeg filter=lfs diff=lfs merge=lfs -text
+coco_data/val2017/*.png filter=lfs diff=lfs merge=lfs -text
+coco_data/annotations/*.json filter=lfs diff=lfs merge=lfs -text
