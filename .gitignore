@@ -7,5 +7,4 @@ __pycache__
 /results
 .vscode
 .DS_Store
-work_logs
-coco_data
+work_logs

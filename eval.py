@@ -164,7 +164,7 @@ def run_evaluation(args):
     print(f"\n✅ {args.version} mIoU: {result_miou:.4f}")
 
     # 结果存入本地文件
-    with open("eval_results.log", "a") as f:
+    with open("/tmp/eval_results.log", "a") as f:
         f.write(f"Version: {args.version} | mIoU: {result_miou:.4f} | Samples: {args.max_samples}\n")
 
 
