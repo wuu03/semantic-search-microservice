@@ -16,8 +16,8 @@ print("Checking data access...")
 from pycocotools.coco import COCO
 import os
 
-img_dir = r"D:\RADSeg\coco_data\val2017"
-ann_file = r"D:\RADSeg\coco_data\annotations\instances_val2017.json"
+img_dir = "coco_data/val2017"
+ann_file = "coco_data/annotations/instances_val2017.json"
 
 if os.path.exists(img_dir) and os.path.exists(ann_file):
     print("Data paths exist.")

@@ -174,8 +174,8 @@ def run_evaluation(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", type=str, default="c-radio_v4-h", help="radio_v3-h or c-radio_v4-h")
-    parser.add_argument("--img_dir", type=str, default=r"D:\RADSeg\coco_data\val2017")
-    parser.add_argument("--ann_file", type=str, default=r"D:\RADSeg\coco_data\annotations\instances_val2017.json")
+    parser.add_argument("--img_dir", type=str, default="coco_data/val2017")
+    parser.add_argument("--ann_file", type=str, default="coco_data/annotations/instances_val2017.json")
     parser.add_argument("--max_samples", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--threshold", type=float, default=0.15)
