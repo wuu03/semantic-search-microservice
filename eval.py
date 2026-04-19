@@ -7,7 +7,6 @@ from PIL import Image
 from pycocotools.coco import COCO
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
-from torchmetrics.segmentation import MeanIoU
 from tqdm import tqdm
 
 
@@ -114,8 +113,9 @@ def run_evaluation(args):
     
     torch.cuda.empty_cache()
 
-    # 指标初始化 (0背景 + 80类 = 81类)
-    metric = MeanIoU(num_classes=len(dataset.classes) + 1).to(device)
+    # 指标初始化: 我们使用自定义混淆矩阵来精确评估出现的类别，从而避免小样本批量引入的不在场类别的 0 分惩罚
+    num_classes = len(dataset.classes) + 1
+    confusion_matrix = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
 
     # 开始循环
     # with torch.no_grad():
@@ -167,18 +167,28 @@ def run_evaluation(args):
                 mode='nearest'
             ).squeeze(1).long()
 
-            # 5. 指标更新
-            metric.update(preds_res, gts)
+            # 5. 指标更新: 累加混淆矩阵
+            valid_mask = (gts >= 0) & (gts < num_classes)
+            inds = num_classes * gts[valid_mask] + preds_res[valid_mask]
+            confusion_matrix += torch.bincount(inds, minlength=num_classes**2).reshape(num_classes, num_classes)
 
             # 6. 【显存清理】
             torch.cuda.empty_cache()
 
-    result_miou = metric.compute().item()
-    print(f"\n✅ {args.version} mIoU: {result_miou:.4f}")
+    # 计算最终 mIoU (仅计算在预测或真值中出现过的类别，严格避免样本过少时的惩罚)
+    intersection = torch.diag(confusion_matrix)
+    union = confusion_matrix.sum(0) + confusion_matrix.sum(1) - intersection
+    
+    valid_classes = union > 0
+    ious = intersection[valid_classes].float() / union[valid_classes].float()
+    result_miou = ious.mean().item()
+    
+    print(f"\n✅ Valid Classes Evaluated: {valid_classes.sum().item()} / {num_classes}")
+    print(f"🚀 {args.version} mIoU: {result_miou:.4f}")
 
     # 结果存入本地文件
     with open("/tmp/eval_results.log", "a") as f:
-        f.write(f"Version: {args.version} | mIoU: {result_miou:.4f} | Samples: {args.max_samples}\n")
+        f.write(f"Version: {args.version} | mIoU: {result_miou:.4f} | Samples: {args.max_samples} | Valid_Cls: {valid_classes.sum().item()}\n")
 
 
 # ==========================================
