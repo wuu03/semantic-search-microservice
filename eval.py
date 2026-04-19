@@ -88,19 +88,21 @@ def run_evaluation(args):
     else:
         radseg.eval()
 
-    # 数据预处理
+    # 数据预处理 (SigLIP 2 期望输入在 [0, 1] 范围，移除之前错误的 Normalize)
     transform = T.Compose([
         T.Resize((512, 512)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.5] * 3, std=[0.5] * 3)
+        T.ToTensor()
     ])
 
     dataset = COCOSemanticDataset(args.img_dir, args.ann_file, transform=transform, max_samples=args.max_samples)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 预计算 80 类文本向量
-    prompts = [f"a photo of a {name}" for name in dataset.classes]
-    text_vecs = radseg.encode_prompts(prompts, onehot=False)
+    # 预计算 80 类 + 1个背景类的文本向量
+    # 添加一个通用的背景/负向 Prompt 来过滤噪声
+    all_prompts = [f"a photo of a {name}" for name in dataset.classes]
+    all_prompts.append("background, environment, surroundings, other unrelated objects")
+    
+    text_vecs = radseg.encode_prompts(all_prompts, onehot=False)
     text_vecs = F.normalize(text_vecs, dim=-1)
 
     # 指标初始化 (0背景 + 80类 = 81类)
@@ -135,16 +137,18 @@ def run_evaluation(args):
             visual_aligned = radseg.align_spatial_features_with_language(scga_feat, onehot=False)
             visual_aligned = F.normalize(visual_aligned, dim=1)
 
-            # 2. 相似度计算
+            # 2. 计算余弦相似度并应用 Softmax 竞争
             B, C, Hf, Wf = visual_aligned.shape
-            # 注意：RADSeg 的特征图尺寸 (Hf, Wf) 通常是输入图 (512) 的 1/16 或 1/32
             flat_feat = visual_aligned.permute(0, 2, 3, 1).reshape(-1, C)
-            similarity = flat_feat @ text_vecs.t()
+            
+            # 使用温度系数 100 放大差异并进行 Softmax
+            logits = (flat_feat @ text_vecs.t()) * 100
+            probs = F.softmax(logits, dim=-1) # (N_pixels, 81)
 
-            # 3. 得到预测 (Hf, Wf)
-            max_vals, max_indices = torch.max(similarity, dim=-1)
-            preds = (max_indices + 1).reshape(B, Hf, Wf)
-            preds[max_vals.reshape(B, Hf, Wf) < args.threshold] = 0
+            # 3. 得到预测结果 (映射 80->0 表示背景，0-79->1-80 表示类)
+            _, max_indices = torch.max(probs, dim=-1)
+            preds = (max_indices + 1) % 81
+            preds = preds.reshape(B, Hf, Wf)
 
             # 4. 【优化关键】将预测图 (比如 16x16) 直接放大到 512x512
             # 之前你可能是在放大到原图尺寸 (比如 4000x3000)，那是极慢的！
