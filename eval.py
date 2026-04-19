@@ -97,13 +97,12 @@ def run_evaluation(args):
     dataset = COCOSemanticDataset(args.img_dir, args.ann_file, transform=transform, max_samples=args.max_samples)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 预计算 80 类 + 1个背景类的文本向量
-    # 添加一个通用的背景/负向 Prompt 来过滤噪声
-    all_prompts = [f"a photo of a {name}" for name in dataset.classes]
-    all_prompts.append("background, environment, surroundings, other unrelated objects")
-    
-    text_vecs = radseg.encode_prompts(all_prompts, onehot=False)
-    text_vecs = F.normalize(text_vecs, dim=-1)
+    # 预计算 80 类 + 1个背景类的语义对齐向量
+    # 使用官方推荐的 encode_labels 方法，它会自动应用 84 种提示词模板进行集成 (Ensemble)
+    all_label_names = dataset.classes + ["background, environment, surroundings, other unrelated objects"]
+    print(f"Encoding {len(all_label_names)} labels with prompt ensembling...")
+    text_vecs = radseg.encode_labels(all_label_names, onehot=False)
+    # text_vecs 内部已经进行了 L2 归一化
 
     # 指标初始化 (0背景 + 80类 = 81类)
     metric = MeanIoU(num_classes=len(dataset.classes) + 1).to(device)
@@ -132,9 +131,9 @@ def run_evaluation(args):
         for imgs, gts in tqdm(loader, desc=f"Evaluating {args.version}"):
             imgs, gts = imgs.to(device), gts.to(device)
 
-            # 1. 模型推理
+            # 1. 模型推理 (开启 use_feat_mlp 以获得像素级的精确对齐)
             scga_feat = radseg.encode_image_to_feat_map(imgs)
-            visual_aligned = radseg.align_spatial_features_with_language(scga_feat, onehot=False)
+            visual_aligned = radseg.align_spatial_features_with_language(scga_feat, onehot=False, use_feat_mlp=True)
             visual_aligned = F.normalize(visual_aligned, dim=1)
 
             # 2. 计算余弦相似度并应用 Softmax 竞争
