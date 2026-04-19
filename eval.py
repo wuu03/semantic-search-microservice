@@ -79,8 +79,7 @@ def run_evaluation(args):
     print(f"\n🚀 Starting Evaluation: {args.version} on {device}")
 
     # 加载模型 (开启 amp=True 以大幅降低显存占用)
-    # 使用 source='local' 以确保调用本地目录中修改过的代码，解决 use_feat_mlp 的 TypeError
-    radseg = torch.hub.load('.', 'radseg_encoder', source='local',
+    radseg = torch.hub.load('RADSeg-OVSS/RADSeg', 'radseg_encoder',
                             model_version=args.version, lang_model="siglip2-g",
                             device=device, predict=False, amp=True)
     torch.cuda.empty_cache()
@@ -134,9 +133,9 @@ def run_evaluation(args):
         for imgs, gts in tqdm(loader, desc=f"Evaluating {args.version}"):
             imgs, gts = imgs.to(device), gts.to(device)
 
-            # 1. 模型推理 (开启 use_feat_mlp 以获得像素级的精确对齐)
+            # 1. 模型推理 (回归远端模式，不使用不支持的 use_feat_mlp)
             scga_feat = radseg.encode_image_to_feat_map(imgs)
-            visual_aligned = radseg.align_spatial_features_with_language(scga_feat, onehot=False, use_feat_mlp=True)
+            visual_aligned = radseg.align_spatial_features_with_language(scga_feat, onehot=False)
             visual_aligned = F.normalize(visual_aligned, dim=1)
 
             # 2. 计算余弦相似度并应用 Softmax 竞争
