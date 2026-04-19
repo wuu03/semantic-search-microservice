@@ -78,10 +78,11 @@ def run_evaluation(args):
     device = args.device
     print(f"\n🚀 Starting Evaluation: {args.version} on {device}")
 
-    # 加载模型
+    # 加载模型 (开启 amp=True 以大幅降低显存占用)
     radseg = torch.hub.load('RADSeg-OVSS/RADSeg', 'radseg_encoder',
                             model_version=args.version, lang_model="siglip2-g",
-                            device=device, predict=False)
+                            device=device, predict=False, amp=True)
+    torch.cuda.empty_cache()
 
     if hasattr(radseg, 'model'):
         radseg.model.eval()
@@ -97,12 +98,13 @@ def run_evaluation(args):
     dataset = COCOSemanticDataset(args.img_dir, args.ann_file, transform=transform, max_samples=args.max_samples)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 预计算 80 类 + 1个背景类的语义对齐向量
-    # 使用官方推荐的 encode_labels 方法，它会自动应用 84 种提示词模板进行集成 (Ensemble)
-    all_label_names = dataset.classes + ["background, environment, surroundings, other unrelated objects"]
-    print(f"Encoding {len(all_label_names)} labels with prompt ensembling...")
-    text_vecs = radseg.encode_labels(all_label_names, onehot=False)
-    # text_vecs 内部已经进行了 L2 归一化
+    # 预计算 80 类 + 1个背景类的语义对齐向量 (包裹在 no_grad 以节省显存)
+    with torch.no_grad():
+        all_label_names = dataset.classes + ["background, environment, surroundings, other unrelated objects"]
+        print(f"Encoding {len(all_label_names)} labels with prompt ensembling (AMP enabled)...")
+        text_vecs = radseg.encode_labels(all_label_names, onehot=False)
+    
+    torch.cuda.empty_cache()
 
     # 指标初始化 (0背景 + 80类 = 81类)
     metric = MeanIoU(num_classes=len(dataset.classes) + 1).to(device)
