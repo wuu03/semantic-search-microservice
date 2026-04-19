@@ -79,7 +79,8 @@ def run_evaluation(args):
     print(f"\n🚀 Starting Evaluation: {args.version} on {device}")
 
     # 加载模型 (开启 amp=True 以大幅降低显存占用)
-    radseg = torch.hub.load('RADSeg-OVSS/RADSeg', 'radseg_encoder',
+    # 使用 source='local' 以确保调用本地目录中修改过的代码，解决 use_feat_mlp 的 TypeError
+    radseg = torch.hub.load('.', 'radseg_encoder', source='local',
                             model_version=args.version, lang_model="siglip2-g",
                             device=device, predict=False, amp=True)
     torch.cuda.empty_cache()
