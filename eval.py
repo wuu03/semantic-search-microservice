@@ -89,20 +89,28 @@ def run_evaluation(args):
     else:
         radseg.eval()
 
-    # 数据预处理 (SigLIP 2 期望输入在 [0, 1] 范围，移除之前错误的 Normalize)
+    # 数据预处理 (恢复关键的 Normalize: SigLIP 和 RADIO v3-h/v4-h 期望输入在 [-1, 1] 范围)
     transform = T.Compose([
         T.Resize((512, 512)),
-        T.ToTensor()
+        T.ToTensor(),
+        T.Normalize(mean=[0.5] * 3, std=[0.5] * 3)
     ])
 
     dataset = COCOSemanticDataset(args.img_dir, args.ann_file, transform=transform, max_samples=args.max_samples)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    # 预计算 80 类 + 1个背景类的语义对齐向量 (包裹在 no_grad 以节省显存)
+    # 预计算向量 (包裹在 no_grad 以节省显存)
+    # 【修复重点】：物体使用 ensemble，背景使用 raw_prompt，最后合并并强制 L2 归一化
     with torch.no_grad():
-        all_label_names = dataset.classes + ["background, environment, surroundings, other unrelated objects"]
-        print(f"Encoding {len(all_label_names)} labels with prompt ensembling (AMP enabled)...")
-        text_vecs = radseg.encode_labels(all_label_names, onehot=False)
+        print(f"Encoding {len(dataset.classes)} objects with prompt ensembling...")
+        obj_vecs = radseg.encode_labels(dataset.classes, onehot=False)
+        
+        bg_prompt = ["background, environment, surroundings, other unrelated objects"]
+        bg_vec = radseg.encode_prompts(bg_prompt, onehot=False)
+        
+        text_vecs = torch.cat([obj_vecs, bg_vec], dim=0)
+        # CRITICAL: 必须重新进行 L2 归一化，因为 encode_labels 均值化后模长变小了
+        text_vecs = F.normalize(text_vecs, dim=-1)
     
     torch.cuda.empty_cache()
 
