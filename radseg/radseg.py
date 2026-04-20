@@ -166,7 +166,8 @@ class RADSegEncoder(ImageSemSegEncoder):
                  coarse_thresh: float = 0.10,
                  minimal_area: int = 225,
                  sam_mask_coff: float = 0.005,
-                 sam_iou_thresh: float = 0.9):
+                 sam_iou_thresh: float = 0.9,
+                 sam_adaptor_name: str = None):
 
         super().__init__(device)
 
@@ -174,7 +175,10 @@ class RADSegEncoder(ImageSemSegEncoder):
         self.amp = amp
         self.model_version = model_version
         self.return_radio_features = return_radio_features
-        adaptor_names = [lang_model, "sam"]
+        if sam_adaptor_name is None:
+            sam_adaptor_name = "sam" if "v3" in model_version else "sam3"
+
+        adaptor_names = [lang_model, sam_adaptor_name]
         self.model = torch.hub.load("NVlabs/RADIO", "radio_model",
                                     version=model_version, progress=True,
                                     skip_validation=True,
@@ -184,7 +188,7 @@ class RADSegEncoder(ImageSemSegEncoder):
         # Steal adaptors from RADIO so it does not auto compute adaptor output.
         # We want to control when that happens.
         self.lang_adaptor = self.model.adaptors[lang_model]
-        self.sam_adaptor = self.model.adaptors["sam"]
+        self.sam_adaptor = self.model.adaptors[sam_adaptor_name]
         self.model.adaptors = None
         last_block = self.model.model.blocks[-1]
         last_block.attn = SelfCorrelatingRecursiveAttn(
