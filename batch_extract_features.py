@@ -219,7 +219,7 @@ class FastImageDataset(Dataset):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch extract clustered RADSeg features from images.")
     parser.add_argument("--input_dir", type=str, default="images/", help="Directory with images")
-    parser.add_argument("--output_file", type=str, default="tmp/features.jsonl", help="Output JSONL file")
+    parser.add_argument("--output_file", type=str, default="/tmp/features.jsonl", help="Output JSONL file")
     parser.add_argument("--num_clusters", type=int, default=100, help="Maximum number of clusters per image")
     parser.add_argument(
         "--min_cluster_pixels",
