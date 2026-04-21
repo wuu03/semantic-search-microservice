@@ -29,7 +29,8 @@ def yield_docs(index_name, jsonl_file):
             data = json.loads(line)
             image_id = data["image_id"]
             # Each cluster center is a separate document
-            for idx, vec in enumerate(data["clusters"]):
+            for idx, cluster in enumerate(data["clusters"]):
+                vec = cluster["v"] if isinstance(cluster, dict) else cluster
                 yield {
                     "_index": index_name,
                     "_source": {
