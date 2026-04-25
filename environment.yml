@@ -31,3 +31,4 @@ dependencies:
       - typing_extensions
       - einops
       - gradio
+      - pycocotools
