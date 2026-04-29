@@ -220,6 +220,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Batch extract clustered RADSeg features from images.")
     parser.add_argument("--input_dir", type=str, default="images/", help="Directory with images")
     parser.add_argument("--output_file", type=str, default="/tmp/features.jsonl", help="Output JSONL file")
+    parser.add_argument(
+        "--start_image",
+        type=int,
+        default=1,
+        help="1-based inclusive start index of images to process after sorting",
+    )
+    parser.add_argument(
+        "--end_image",
+        type=int,
+        default=None,
+        help="1-based inclusive end index of images to process after sorting",
+    )
     parser.add_argument("--num_clusters", type=int, default=100, help="Maximum number of clusters per image")
     parser.add_argument(
         "--min_cluster_pixels",
@@ -248,12 +260,34 @@ if __name__ == "__main__":
         print(f"Error: {args.input_dir} not found.")
         raise SystemExit(1)
 
-    image_paths = [
+    image_paths = sorted(
+        [
         os.path.join(args.input_dir, name)
         for name in os.listdir(args.input_dir)
         if name.casefold().endswith((".png", ".jpg", ".jpeg"))
-    ]
+        ]
+    )
     print(f"Found {len(image_paths)} images in {args.input_dir}")
+
+    total_images = len(image_paths)
+    if args.start_image < 1:
+        print("Error: --start_image must be >= 1.")
+        raise SystemExit(1)
+    if args.end_image is not None and args.end_image < args.start_image:
+        print("Error: --end_image must be >= --start_image.")
+        raise SystemExit(1)
+
+    start_idx = args.start_image - 1
+    end_idx = total_images if args.end_image is None else min(args.end_image, total_images)
+    if start_idx >= total_images:
+        print(f"Error: --start_image={args.start_image} exceeds total images {total_images}.")
+        raise SystemExit(1)
+
+    image_paths = image_paths[start_idx:end_idx]
+    print(
+        f"Selected images {args.start_image} to {start_idx + len(image_paths)} "
+        f"(count={len(image_paths)}) for this run."
+    )
 
     dataset = FastImageDataset(image_paths, extractor.transform)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=8, pin_memory=True, shuffle=False)
