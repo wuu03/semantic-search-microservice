@@ -290,7 +290,8 @@ if __name__ == "__main__":
     )
 
     dataset = FastImageDataset(image_paths, extractor.transform)
-    dataloader = DataLoader(dataset, batch_size=1, num_workers=8, pin_memory=True, shuffle=False)
+    # Use a single-process loader to avoid /dev/shm exhaustion on shared GPU nodes.
+    dataloader = DataLoader(dataset, batch_size=1, num_workers=0, pin_memory=False, shuffle=False)
 
     processed_ids = set()
     if os.path.exists(args.output_file):
