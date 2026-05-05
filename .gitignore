@@ -11,3 +11,5 @@ work_logs
 *.jsonl
 *.json
 scratch/hf_models/
+scratch/
+images_metadata.csv
