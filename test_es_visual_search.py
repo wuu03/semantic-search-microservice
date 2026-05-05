@@ -1,7 +1,9 @@
 import argparse
+import csv
 import math
 import os
 import re
+import unicodedata
 import zlib
 
 import cv2
@@ -16,6 +18,40 @@ from redis import Redis
 from vl_backends import create_backend
 
 
+GENERAL_QUERY_TERMS = {
+    "architecture",
+    "building",
+    "bridge",
+    "canal",
+    "castle",
+    "cathedral",
+    "church",
+    "city",
+    "harbor",
+    "lake",
+    "mountain",
+    "park",
+    "river",
+    "road",
+    "square",
+    "station",
+    "street",
+    "tower",
+    "town",
+    "village",
+    "water",
+}
+
+METADATA_SEARCH_FIELDS = [
+    "landmarks_identified",
+    "final_place",
+    "description",
+    "final_city",
+    "final_country",
+    "transcription",
+]
+
+
 def slugify_for_filename(text):
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
     return slug or "query"
@@ -27,6 +63,108 @@ def build_default_output_path(backend, es_index, query_text, result_mode):
     suffix = "cluster_mode" if result_mode == "cluster" else "heatmap"
     filename = f"{backend}_{es_index}_{safe_query}_{suffix}.png"
     return os.path.join("scratch", filename)
+
+
+def normalize_text(text):
+    text = "" if text is None else str(text)
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def tokenize(text):
+    return re.findall(r"[a-z0-9]+", normalize_text(text))
+
+
+class MetadataQueryRouter:
+    """Route broad visual concepts through vector search and named places through metadata-filtered reranking."""
+
+    def __init__(self, metadata_csv, max_images=500):
+        self.metadata_csv = metadata_csv
+        self.max_images = max_images
+        self.rows = []
+        if metadata_csv and os.path.exists(metadata_csv):
+            with open(metadata_csv, "r", encoding="latin1", newline="") as handle:
+                self.rows = list(csv.DictReader(handle))
+
+    def route(self, query_text, mode="auto"):
+        if mode == "off" or not self.rows:
+            return {
+                "query_type": "general",
+                "candidate_image_ids": None,
+                "reason": "metadata filtering disabled or metadata CSV missing",
+                "support": 0,
+                "examples": [],
+            }
+
+        scored = self._score_metadata_matches(query_text)
+        candidates = [item for item in scored if item["score"] >= 3.0]
+        query_tokens = set(tokenize(query_text))
+        is_generic = query_tokens and query_tokens.issubset(GENERAL_QUERY_TERMS)
+        should_filter = mode == "force" or (bool(candidates) and not is_generic)
+
+        if not should_filter:
+            return {
+                "query_type": "general",
+                "candidate_image_ids": None,
+                "reason": "broad visual concept; using pure vector search",
+                "support": len(candidates),
+                "examples": candidates[:5],
+            }
+
+        candidate_image_ids = [item["image_id"] for item in candidates[: self.max_images]]
+        return {
+            "query_type": "specific",
+            "candidate_image_ids": candidate_image_ids,
+            "reason": "named place/landmark matched metadata; filtering candidates before vector rerank",
+            "support": len(candidates),
+            "examples": candidates[:5],
+        }
+
+    def _score_metadata_matches(self, query_text):
+        query_norm = normalize_text(query_text)
+        query_tokens = set(tokenize(query_text))
+        if not query_tokens:
+            return []
+
+        scored = []
+        for row in self.rows:
+            image_id = (row.get("image_filename") or "").strip()
+            if not image_id:
+                continue
+
+            score = 0.0
+            matched_fields = []
+            for field in METADATA_SEARCH_FIELDS:
+                value = row.get(field) or ""
+                value_norm = normalize_text(value)
+                if not value_norm:
+                    continue
+
+                field_tokens = set(tokenize(value_norm))
+                if query_norm and query_norm in value_norm:
+                    score += 6.0 if field in {"landmarks_identified", "final_place"} else 3.0
+                    matched_fields.append(field)
+                elif query_tokens.issubset(field_tokens):
+                    score += 4.0 if field in {"landmarks_identified", "final_place"} else 2.0
+                    matched_fields.append(field)
+                else:
+                    overlap = len(query_tokens & field_tokens)
+                    if overlap:
+                        score += overlap / max(len(query_tokens), 1)
+
+            if score >= 1.0:
+                scored.append(
+                    {
+                        "image_id": image_id,
+                        "score": score,
+                        "matched_fields": sorted(set(matched_fields)),
+                        "final_place": row.get("final_place", ""),
+                        "landmarks_identified": row.get("landmarks_identified", ""),
+                    }
+                )
+
+        return sorted(scored, key=lambda item: item["score"], reverse=True)
 
 
 class TextSearchVisualizer:
@@ -99,19 +237,7 @@ class TextSearchVisualizer:
         )
         return response["hits"]["hits"]
 
-    def direct_search_with_negatives(self, query_text, negative_text, candidate_k, top_k, temperature, result_mode="image"):
-        negative_prompts = self.normalize_negative_prompts(negative_text)
-        prompts = [query_text] + negative_prompts
-        text_vectors = self.encode_prompts(prompts)
-
-        positive_vector = text_vectors[0].detach().cpu().numpy().tolist()
-        negative_vectors = [vec.detach().cpu().numpy().tolist() for vec in text_vectors[1:]]
-
-        preselected_hits = self.knn_search_candidates(query_vector=positive_vector, candidate_k=candidate_k)
-        candidate_ids = [hit["_id"] for hit in preselected_hits]
-        if not candidate_ids:
-            return [], negative_prompts
-
+    def score_candidate_query(self, positive_vector, negative_vectors, temperature, candidate_query, size):
         script_source = f"""
 double pos = cosineSimilarity(params.positive_vector, '{self.vector_field}');
 double numer = Math.exp(pos * params.temperature);
@@ -122,12 +248,11 @@ for (neg in params.negative_vectors) {{
 }}
 return numer / denom;
 """
-
         response = self.es.search(
             index=self.es_index,
             query={
                 "script_score": {
-                    "query": {"ids": {"values": candidate_ids}},
+                    "query": candidate_query,
                     "script": {
                         "source": script_source,
                         "params": {
@@ -138,12 +263,52 @@ return numer / denom;
                     },
                 }
             },
-            _source=[self.image_id_field, self.cluster_id_field],
-            size=candidate_k,
+            _source=[self.image_id_field, self.cluster_id_field, "final_place", "landmarks_identified"],
+            size=size,
         )
+        return response["hits"]["hits"]
+
+    def direct_search_with_negatives(
+        self,
+        query_text,
+        negative_text,
+        candidate_k,
+        top_k,
+        temperature,
+        result_mode="image",
+        metadata_candidate_image_ids=None,
+    ):
+        negative_prompts = self.normalize_negative_prompts(negative_text)
+        prompts = [query_text] + negative_prompts
+        text_vectors = self.encode_prompts(prompts)
+
+        positive_vector = text_vectors[0].detach().cpu().numpy().tolist()
+        negative_vectors = [vec.detach().cpu().numpy().tolist() for vec in text_vectors[1:]]
+
+        if metadata_candidate_image_ids:
+            candidate_query = {"terms": {self.image_id_field: metadata_candidate_image_ids}}
+            hits = self.score_candidate_query(
+                positive_vector=positive_vector,
+                negative_vectors=negative_vectors,
+                temperature=temperature,
+                candidate_query=candidate_query,
+                size=max(candidate_k, top_k * 10),
+            )
+        else:
+            preselected_hits = self.knn_search_candidates(query_vector=positive_vector, candidate_k=candidate_k)
+            candidate_ids = [hit["_id"] for hit in preselected_hits]
+            if not candidate_ids:
+                return [], negative_prompts
+            hits = self.score_candidate_query(
+                positive_vector=positive_vector,
+                negative_vectors=negative_vectors,
+                temperature=temperature,
+                candidate_query={"ids": {"values": candidate_ids}},
+                size=candidate_k,
+            )
 
         scored_hits = []
-        for hit in response["hits"]["hits"]:
+        for hit in hits:
             source = hit.get("_source", {})
             cluster_id = source.get(self.cluster_id_field, 0)
             scored_hits.append(
@@ -152,6 +317,8 @@ return numer / denom;
                     "cluster_id": int(cluster_id),
                     "score": float(hit.get("_score", 0.0)),
                     "raw_score": float(hit.get("_score", 0.0)),
+                    "final_place": source.get("final_place", ""),
+                    "landmarks_identified": source.get("landmarks_identified", ""),
                 }
             )
 
@@ -286,6 +453,9 @@ def main():
     parser.add_argument("--redis_url", type=str, default="redis://localhost:6379/0", help="Redis connection URL")
     parser.add_argument("--redis_key_prefix", type=str, default="tips_fm", help="Redis key prefix used for feature maps")
     parser.add_argument("--image_root", type=str, default="images", help="Directory containing original images")
+    parser.add_argument("--metadata_csv", type=str, default="images_metadata.csv", help="Optional metadata CSV for specific landmark/place query filtering")
+    parser.add_argument("--metadata_filter", type=str, default="auto", choices=["auto", "off", "force"], help="Use metadata filtering for specific queries")
+    parser.add_argument("--metadata_max_images", type=int, default=500, help="Maximum metadata-matched images allowed into vector reranking")
     parser.add_argument("--model_version", type=str, default="c-radio_v4-h", help="RADSeg model version")
     parser.add_argument("--lang_model", type=str, default="siglip2-g", help="RADSeg language model")
     parser.add_argument("--device", type=str, default="cpu", help="Device for text encoding")
@@ -320,6 +490,20 @@ def main():
         raise SystemExit(f"Could not connect to Elasticsearch at {args.es_host}")
     visualizer.redis.ping()
 
+    router = MetadataQueryRouter(args.metadata_csv, max_images=args.metadata_max_images)
+    route = router.route(args.query, mode=args.metadata_filter)
+    print(
+        f"Query route: {route['query_type']} "
+        f"support={route['support']} reason={route['reason']}"
+    )
+    for example in route["examples"][:3]:
+        print(
+            "  metadata match: "
+            f"image={example['image_id']} score={example['score']:.2f} "
+            f"fields={','.join(example['matched_fields']) or '-'} "
+            f"place={example['final_place']} landmark={example['landmarks_identified']}"
+        )
+
     results, negative_prompts = visualizer.direct_search_with_negatives(
         query_text=args.query,
         negative_text=args.negative_text,
@@ -327,13 +511,15 @@ def main():
         top_k=args.top_k,
         temperature=args.temperature,
         result_mode=args.result_mode,
+        metadata_candidate_image_ids=route["candidate_image_ids"],
     )
 
     print(f"Top {len(results)} results for '{args.query}':")
     for rank, result in enumerate(results, start=1):
         print(
             f"{rank}. image={result['image_id']} cluster={result['cluster_id']} "
-            f"score={result['score']:.4f} raw_es={result['raw_score']:.4f}"
+            f"score={result['score']:.4f} raw_es={result['raw_score']:.4f} "
+            f"place={result.get('final_place', '')}"
         )
 
     visualizer.visualize_results(

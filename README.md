@@ -101,10 +101,13 @@ python index_features_to_es.py \
   --jsonl features_radseg.jsonl \
   --es_host http://localhost:9200 \
   --index radseg_images \
+  --metadata_csv images_metadata.csv \
   --recreate
 ```
 
 The vector dimension is inferred automatically from the JSONL file.
+If `--metadata_csv` is provided, every cluster document also stores `final_place`,
+`landmarks_identified`, `description`, `transcription`, city/country, and date.
 
 ## 5. Run search demo
 
@@ -118,6 +121,8 @@ python test_es_visual_search.py "arched bridge over water" \
   --redis_key_prefix radseg_fm \
   --image_root images \
   --negative_text "background, sky, clouds, text, border, trees, road, people" \
+  --metadata_csv images_metadata.csv \
+  --metadata_filter auto \
   --top_k 6 \
   --candidate_k 120 \
   --temperature 10
@@ -128,6 +133,7 @@ Notes:
 - If `--output_path` is omitted, a file is auto-generated under `scratch/`
 - `--result_mode image` returns top images
 - `--result_mode cluster` returns top clusters, allowing multiple clusters from one image
+- `--metadata_filter auto` treats broad concepts like `river` or `church` as pure visual search, but treats specific names like `Charles Bridge` or `Piazza San Marco` as metadata-filtered visual reranking.
 
 ## 6. Evaluate search quality
 
@@ -195,3 +201,8 @@ This codebase supports two query families:
    - `Schloss Pyrmont`
 
 For product use, specific landmark queries should eventually combine metadata filtering with visual reranking.
+This branch implements that behavior in the demo:
+
+- General query: retrieve cluster vectors globally, then rerank with positive-vs-negative prompt scoring.
+- Specific landmark/place query: find candidate images from `landmarks_identified`, `final_place`, `description`, city/country, and transcription, then rerank only those images' clusters visually.
+- Output remains image cards with highlighted matched clusters, so a UI can show image results first and jump from the selected image to its map POI.
