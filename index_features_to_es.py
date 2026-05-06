@@ -49,13 +49,47 @@ def load_metadata(metadata_csv: Path | None) -> dict:
 
     metadata_by_image = {}
     with metadata_csv.open("r", encoding="latin1", newline="") as handle:
-        for row in csv.DictReader(handle):
-            image_id = (row.get("image_filename") or "").strip()
-            if not image_id:
+        reader = csv.reader(handle)
+        
+        try:
+            headers = next(reader)
+        except StopIteration:
+            return {}
+
+        if not headers:
+            return {}
+
+        last_col_name = "unknown_uuid" 
+        for col in reversed(headers):
+            col_stripped = col.strip()
+            if col_stripped:
+                last_col_name = col_stripped
+                break
+
+        for row in reader:
+            if not row:
                 continue
-            metadata = {field: (row.get(field) or "").strip() for field in METADATA_FIELDS}
-            metadata["metadata_text"] = " ".join(value for value in metadata.values() if value)
-            metadata_by_image[image_id] = metadata
+            
+            image_id_raw = row[0].strip()
+            if not image_id_raw:
+                continue
+            
+            unified_key = Path(image_id_raw).stem
+
+            last_col_val = ""
+            for item in reversed(row):
+                item_stripped = item.strip()
+                if item_stripped:  
+                    last_col_val = item_stripped
+                    break
+            
+            if not last_col_val or last_col_val == image_id_raw:
+                last_col_val = "unknown_uuid"
+            
+            metadata_by_image[unified_key] = {
+                last_col_name: last_col_val
+            }
+            
     return metadata_by_image
 
 
@@ -99,7 +133,9 @@ def generate_actions(jsonl_path: Path, index_name: str, metadata_by_image: dict 
             if not line.strip():
                 continue
             record = json.loads(line)
-            image_id = record["image_id"]
+            image_id_raw = record["image_id"]
+            unified_key = Path(image_id_raw).stem
+
             for fallback_cluster_id, cluster in enumerate(record.get("clusters", [])):
                 if isinstance(cluster, dict):
                     cluster_id = int(cluster.get("cluster_id", fallback_cluster_id))
@@ -109,15 +145,16 @@ def generate_actions(jsonl_path: Path, index_name: str, metadata_by_image: dict 
                     vector = cluster
 
                 source = {
-                    "image_id": image_id,
+                    "image_id": image_id_raw, 
                     "cluster_id": cluster_id,
                     "vector": vector,
                 }
-                source.update(metadata_by_image.get(image_id, {}))
+                
+                source.update(metadata_by_image.get(unified_key, {}))
 
                 yield {
                     "_index": index_name,
-                    "_id": f"{image_id}_{cluster_id}",
+                    "_id": f"{image_id_raw}_{cluster_id}",
                     "_source": source,
                 }
 
