@@ -23,6 +23,9 @@ class VisionLanguageBackend:
 
     def encode_image_to_feature_map(self, image_input):
         raise NotImplementedError
+    
+    def encode_image_global(self, image_input) -> torch.Tensor:
+        raise NotImplementedError
 
 
 class RADSegBackend(VisionLanguageBackend):
@@ -59,6 +62,23 @@ class RADSegBackend(VisionLanguageBackend):
         feat_map = self.model.encode_image_to_feat_map(image_input.to(self.device))
         aligned = self.model.align_spatial_features_with_language(feat_map, onehot=False)
         return F.normalize(aligned, dim=1)
+    
+    @torch.no_grad()
+    def encode_image_global(self, image_input) -> torch.Tensor:
+        # image_input = image_input.to(self.device)
+        
+        # if hasattr(self.model, "model"):
+        #     summary, _ = self.model.model(image_input)
+        # else:
+        #     summary, _ = self.model(image_input)
+        feat_map = self.model.encode_image_to_feat_map(image_input.to(self.device))
+        aligned = self.model.align_spatial_features_with_language(feat_map, onehot=False)
+
+        pooled = F.adaptive_avg_pool2d(aligned, (1, 1))
+        
+        global_vector = pooled.view(pooled.size(0), -1)
+            
+        return F.normalize(global_vector, dim=-1)
 
 
 class TIPSBackend(VisionLanguageBackend):
