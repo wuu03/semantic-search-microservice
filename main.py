@@ -1,4 +1,4 @@
-# uvicorn api.main:app --host 0.0.0.0 --port 8001
+# uvicorn main:app --host 0.0.0.0 --port 8001
 import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException, APIRouter, Response, File, UploadFile, Form, Query
