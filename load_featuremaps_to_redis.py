@@ -1,3 +1,4 @@
+# python load_featuremaps_to_redis.py --jsonl features_radseg_k10.jsonl --redis_url redis://localhost:6379/0 --key_prefix radseg_k10_fm --overwrite
 import argparse
 import json
 import zlib

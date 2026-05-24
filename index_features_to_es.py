@@ -1,3 +1,4 @@
+# python index_features_to_es.py --jsonl features_radseg_k10.jsonl --es_host http://localhost:9200 --index radseg_k10_images --metadata_csv images_metadata.csv --laravel_json historical_metadata.json --recreate
 import argparse
 import csv
 import json
@@ -92,6 +93,11 @@ def load_metadata(metadata_csv: Path | None) -> dict:
             
     return metadata_by_image
 
+def load_laravel_metadata(json_path: Path | None) -> dict:
+    if json_path is None or not json_path.exists():
+        return {}
+    with json_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 def create_index(es: Elasticsearch, index_name: str, dims: int, recreate: bool) -> None:
     if recreate and es.indices.exists(index=index_name):
@@ -105,15 +111,10 @@ def create_index(es: Elasticsearch, index_name: str, dims: int, recreate: bool) 
             "properties": {
                 "image_id": {"type": "keyword"},
                 "cluster_id": {"type": "integer"},
-                "final_country": {"type": "keyword"},
-                "final_city": {"type": "keyword"},
-                "final_place": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
-                "date": {"type": "keyword"},
-                "description": {"type": "text"},
-                "transcription": {"type": "text"},
-                "landmarks_identified": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
                 "historical_record_uuid": {"type": "keyword"},
-                "metadata_text": {"type": "text"},
+                "dataset_slug": {"type": "keyword"},
+                "date_range": {"type": "date_range"},
+                "poi_locations": {"type": "geo_point"},
                 "vector": {
                     "type": "dense_vector",
                     "dims": dims,
@@ -126,7 +127,7 @@ def create_index(es: Elasticsearch, index_name: str, dims: int, recreate: bool) 
     es.indices.create(index=index_name, body=mapping)
 
 
-def generate_actions(jsonl_path: Path, index_name: str, metadata_by_image: dict | None = None):
+def generate_actions(jsonl_path: Path, index_name: str, metadata_by_image: dict | None = None, laravel_metadata: dict | None = None):
     metadata_by_image = metadata_by_image or {}
     with jsonl_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -152,6 +153,10 @@ def generate_actions(jsonl_path: Path, index_name: str, metadata_by_image: dict 
                 
                 source.update(metadata_by_image.get(unified_key, {}))
 
+                hr_uuid = source.get("historical_record_uuid")
+                if hr_uuid and hr_uuid in laravel_metadata:
+                    source.update(laravel_metadata[hr_uuid])
+
                 yield {
                     "_index": index_name,
                     "_id": f"{image_id_raw}_{cluster_id}",
@@ -165,6 +170,7 @@ def main():
     parser.add_argument("--es_host", default="http://localhost:9200", help="Elasticsearch host")
     parser.add_argument("--index", default="tips_images", help="Index name")
     parser.add_argument("--metadata_csv", default=None, help="Optional image metadata CSV to copy into every cluster document")
+    parser.add_argument("--laravel_json", default=None, help="Path to Laravel exported metadata JSON")
     parser.add_argument("--batch_size", type=int, default=500, help="Bulk indexing batch size")
     parser.add_argument("--recreate", action="store_true", help="Delete and recreate index before indexing")
     args = parser.parse_args()
@@ -180,6 +186,7 @@ def main():
     dims = infer_vector_dim(jsonl_path)
     total_vectors = count_vectors(jsonl_path)
     metadata_by_image = load_metadata(Path(args.metadata_csv) if args.metadata_csv else None)
+    laravel_metadata = load_laravel_metadata(Path(args.laravel_json) if args.laravel_json else None)
     print(f"Vector dimension: {dims}")
     print(f"Total vectors: {total_vectors}")
     if metadata_by_image:
@@ -192,7 +199,7 @@ def main():
     for ok, result in tqdm(
         helpers.streaming_bulk(
             client=es,
-            actions=generate_actions(jsonl_path, args.index, metadata_by_image=metadata_by_image),
+            actions=generate_actions(jsonl_path, args.index, metadata_by_image=metadata_by_image, laravel_metadata=laravel_metadata),
             chunk_size=args.batch_size,
             max_retries=3,
             raise_on_error=False,
