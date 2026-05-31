@@ -13,3 +13,7 @@ work_logs
 scratch/hf_models/
 scratch/
 images_metadata.csv
+.cache/
+redis_data/
+start_dev.sh
+.env

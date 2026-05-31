@@ -5,6 +5,12 @@ import os
 import sys
 from typing import List
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+local_cache_dir = os.path.join(current_dir, ".cache")
+
+os.environ["HF_HOME"] = os.path.join(local_cache_dir, "huggingface")
+os.environ["TORCH_HOME"] = os.path.join(local_cache_dir, "torch")
+
 import clip
 import torch
 import torch.nn.functional as F

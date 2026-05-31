@@ -10,6 +10,8 @@ import numpy as np
 from PIL import Image
 from redis import Redis
 import cv2
+import os
+from dotenv import load_dotenv
 
 from vl_backends import create_backend
 
@@ -17,7 +19,10 @@ app = FastAPI(title="TimeAtlas Vector Encoding API", version="1.0")
 
 backend = None
 
-redis_client = Redis.from_url("redis://localhost:6379/0")
+load_dotenv()
+redis_host = os.getenv("SERVER_IP", "127.0.0.1")
+redis_port = os.getenv("REDIS_PORT", "6379")
+redis_client = Redis.from_url(f"redis://{redis_host}:{redis_port}/0")
 
 class EncodeRequest(BaseModel):
     query: str
@@ -85,6 +90,7 @@ async def encode(
         try:
             contents = await query_image.read()
             image = Image.open(io.BytesIO(contents)).convert("RGB")
+            neg_prompts = [p.strip() for p in negative_text.split(",") if p.strip()] if negative_text else ["background"]
 
             patch_size = 16 
             original_w, original_h = image.size
@@ -103,12 +109,19 @@ async def encode(
 
             with torch.no_grad():
                 embedding = backend.encode_image_global(image_tensor)
+                neg_embeddings = backend.encode_text(neg_prompts)
+                if neg_embeddings.dim() == 1:
+                    neg_embeddings = neg_embeddings.unsqueeze(0)
+                embedding = F.normalize(embedding, p=2, dim=-1)
+                neg_embeddings = F.normalize(neg_embeddings, p=2, dim=-1)
                 
             image_vector = embedding.detach().cpu().numpy().tolist()[0]
+            neg_vectors = neg_embeddings.detach().cpu().numpy().tolist()
             
             return {
                 "query_type": "image",
-                "vector": image_vector
+                "vector": image_vector,
+                "negative_vectors": neg_vectors
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Image processing failed: {str(e)}")
@@ -163,7 +176,8 @@ async def get_cluster_mask(image_id: str, clusters: str,
 
     mask_rgba = np.zeros((height, width, 4), dtype=np.uint8)
 
-    kernel = np.ones((3, 3), np.uint8)
+    kernel_size = max(3, int(min(height, width) * 0.005))
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     
     cluster_list = clusters.split(",")
     for item in cluster_list:
