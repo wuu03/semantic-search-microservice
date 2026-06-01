@@ -1,4 +1,4 @@
-# python load_featuremaps_to_redis.py --jsonl features_radseg_k10.jsonl --redis_url redis://SERVER_IP:6379/0 --key_prefix radseg_k10_fm --overwrite
+# python load_featuremaps_to_redis.py --jsonl test_features.jsonl --redis_url redis://SERVER_IP:6379/0 --key_prefix image_fm --overwrite
 import argparse
 import json
 import zlib

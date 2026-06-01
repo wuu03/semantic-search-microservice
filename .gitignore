@@ -9,7 +9,7 @@ __pycache__
 .DS_Store
 work_logs
 *.jsonl
-*.json
+*.parquet
 scratch/hf_models/
 scratch/
 images_metadata.csv
@@ -17,3 +17,4 @@ images_metadata.csv
 redis_data/
 start_dev.sh
 .env
+assets/
