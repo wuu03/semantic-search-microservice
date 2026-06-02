@@ -15,6 +15,8 @@ import os
 import json
 from dotenv import load_dotenv
 import laspy
+import time
+import logging
 
 from vl_backends import create_backend
 
@@ -31,6 +33,24 @@ RENDERS_ROOT = Path(os.getenv("RENDERS_ROOT", "./renders"))
 ASSETS_ROOT = Path(os.getenv("ASSETS_ROOT", "./assets"))
 
 _tile_cache = {}
+
+LOG_DIR = "./logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger("performance_metrics")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    file_handler = logging.FileHandler(os.path.join(LOG_DIR, "performance.log"), encoding="utf-8")
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 class EncodeRequest(BaseModel):
     query: str
@@ -67,36 +87,14 @@ async def load_model():
     except Exception as e:
         print(f"Failed to load model: {e}")
 
-# @app.post("/api/encode", response_model=EncodeResponse)
-# async def encode_text(request: EncodeRequest):
-#     if backend is None:
-#         raise HTTPException(status_code=503, detail="Loading model... Please try again later.")
-
-#     try:
-#         neg_prompts = [p.strip() for p in request.negative_text.split(",") if p.strip()] if request.negative_text else ["background"]
-#         prompts = [request.query] + neg_prompts
-
-#         with torch.no_grad():
-#             embeddings = backend.encode_text(prompts)
-#             if embeddings.dim() == 1:
-#                 embeddings = embeddings.unsqueeze(0)
-#             embeddings = F.normalize(embeddings, dim=-1)
-
-#         text_vectors = embeddings.detach().cpu().numpy().tolist()
-
-#         return {
-#             "positive_vector": text_vectors[0],
-#             "negative_vectors": text_vectors[1:]
-#         }
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/api/encode", response_model=UnifiedEncodeResponse)
 async def encode(
     query_text: Optional[str] = Form(None, description="Text Query"),
     query_image: Optional[UploadFile] = File(None, description="Image Query"),
     negative_text: Optional[str] = Form("background", description="Negative Text")
 ):
+    request_start_time = time.time()
+
     if backend is None:
         raise HTTPException(status_code=503, detail="Loading model... Please try again later.")
 
@@ -121,6 +119,9 @@ async def encode(
                 import torchvision.transforms as T
                 image_tensor = T.ToTensor()(image).unsqueeze(0)
 
+            prep_time = (time.time() - request_start_time) * 1000
+            inference_start_time = time.time()
+
             with torch.no_grad():
                 embedding = backend.encode_image_embedding(image_tensor)
                 if embedding.dim() == 1:
@@ -131,9 +132,14 @@ async def encode(
                 embedding = F.normalize(embedding, p=2, dim=-1)
                 neg_embeddings = F.normalize(neg_embeddings, p=2, dim=-1)
                 
+            inference_time = (time.time() - inference_start_time) * 1000
+
             image_vector = embedding.detach().cpu().numpy().tolist()[0]
             neg_vectors = neg_embeddings.detach().cpu().numpy().tolist()
             
+            total_time = (time.time() - request_start_time) * 1000
+            logger.info(f"[Metrics - Image] Total: {total_time:.2f}ms | Prep: {prep_time:.2f}ms | Inference: {inference_time:.2f}ms")
+
             return {
                 "query_type": "image",
                 "vector": image_vector,
@@ -147,13 +153,21 @@ async def encode(
             neg_prompts = [p.strip() for p in negative_text.split(",") if p.strip()] if negative_text else ["background"]
             prompts = [query_text] + neg_prompts
 
+            inference_start_time = time.time()
+
             with torch.no_grad():
                 embeddings = backend.encode_text(prompts)
                 if embeddings.dim() == 1:
                     embeddings = embeddings.unsqueeze(0)
                 embeddings = F.normalize(embeddings, dim=-1)
 
+            inference_time = (time.time() - inference_start_time) * 1000
+
             text_vectors = embeddings.detach().cpu().numpy().tolist()
+
+            total_time = (time.time() - request_start_time) * 1000
+
+            logger.info(f"[Metrics - Text] Total: {total_time:.2f}ms | Inference: {inference_time:.2f}ms")
 
             return {
                 "query_type": "text",

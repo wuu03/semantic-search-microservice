@@ -267,16 +267,17 @@ class Talk2DINOBackend(VisionLanguageBackend):
 
     @torch.no_grad()
     def encode_text(self, prompts: List[str]) -> torch.Tensor:
-        outputs = []
-        for prompt in prompts:
-            text_embed = self.model.encode_text(prompt)
-            if not isinstance(text_embed, torch.Tensor):
-                text_embed = torch.as_tensor(text_embed)
-            if text_embed.dim() == 1:
-                text_embed = text_embed.unsqueeze(0)
-            outputs.append(text_embed.to(self.device))
-        embeddings = torch.cat(outputs, dim=0)
-        return F.normalize(embeddings, dim=-1)
+        if not prompts:
+            return torch.empty((0, 1024), device=self.device) 
+
+        tokens = self.model.build_dataset_class_tokens("sub_imagenet_template", prompts)
+
+        text_embeds = self.model.build_text_embedding(tokens).float()
+
+        if text_embeds.ndim == 3:
+            text_embeds = text_embeds.mean(dim=1)
+
+        return F.normalize(text_embeds.to(self.device), dim=-1)
 
     @torch.no_grad()
     def encode_image_to_feature_map(self, image_input) -> torch.Tensor:
