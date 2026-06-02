@@ -222,6 +222,94 @@ async def get_cluster_mask(image_id: str, clusters: str,
     img.save(img_byte_arr, format='PNG')
     return Response(content=img_byte_arr.getvalue(), media_type="image/png")
 
+@app.get("/api/heatmap/{image_id}")
+async def get_cluster_heatmap(
+    image_id: str, 
+    clusters: str,
+    w: Optional[int] = Query(None), 
+    h: Optional[int] = Query(None),
+    g_max: Optional[float] = Query(None, description="Global maximum score for normalization"),
+    g_min: Optional[float] = Query(None, description="Global minimum score for normalization")
+):
+    key = f"image_fm:{image_id}" 
+    payload = redis_client.hgetall(key)
+    if not payload:
+        return Response(status_code=404)
+
+    height = int(payload[b"height"])
+    width = int(payload[b"width"])
+    dtype_name = payload[b"dtype"].decode("utf-8")
+    decoded = zlib.decompress(payload[b"data"])
+    cluster_id_map = np.frombuffer(decoded, dtype=np.dtype(dtype_name)).reshape(height, width)
+
+    if w is not None and h is not None and w > 0 and h > 0:
+        cluster_id_map = cv2.resize(
+            cluster_id_map, 
+            (w, h), 
+            interpolation=cv2.INTER_NEAREST
+        )
+        height, width = h, w
+
+    cluster_list = clusters.split(",")
+    score_dict = {}
+    for item in cluster_list:
+        parts = item.split(":")
+        if len(parts) != 2: continue
+        score_dict[int(parts[0])] = float(parts[1])
+
+    if not score_dict:
+        empty = np.zeros((height, width, 4), dtype=np.uint8)
+        img = Image.fromarray(empty, 'RGBA')
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        return Response(content=img_byte_arr.getvalue(), media_type="image/png")
+
+    score_map = np.zeros((height, width), dtype=np.float32)
+    for cid, score in score_dict.items():
+        score_map[cluster_id_map == cid] = score
+    
+    valid_scores = np.array(list(score_dict.values()))
+    
+    max_score = g_max if g_max is not None else valid_scores.max()
+    min_score = g_min if g_min is not None else valid_scores.min()
+
+    if max_score > min_score:
+        norm_map = np.clip((score_map - min_score) / (max_score - min_score), 0.0, 1.0)
+    else:
+        norm_map = np.where(score_map > 0, 1.0, 0.0)
+
+    uint8_map = (norm_map * 255).astype(np.uint8)
+    heatmap_bgr = cv2.applyColorMap(uint8_map, cv2.COLORMAP_TURBO)
+    heatmap_rgba = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGBA)
+
+    alpha_channel = np.where(
+        score_map > 0, 
+        (norm_map * 135 + 120).astype(np.uint8), 
+        0
+    )
+    heatmap_rgba[:, :, 3] = alpha_channel
+
+    heatmap_rgba = cv2.GaussianBlur(heatmap_rgba, (21, 21), 0)
+    
+    heatmap_rgba[heatmap_rgba[:, :, 3] < 15, 3] = 0
+
+    valid_pixels = (score_map > 0).astype(np.uint8)
+    
+    kernel_size = max(3, int(min(height, width) * 0.01))
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    
+    dilated = cv2.dilate(valid_pixels, kernel, iterations=1)
+    
+    border_pixels = (dilated - valid_pixels) > 0
+    
+    heatmap_rgba[border_pixels] = [255, 255, 255, 250]
+
+    img = Image.fromarray(heatmap_rgba, 'RGBA')
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    return Response(content=img_byte_arr.getvalue(), media_type="image/png")
+
+
 def get_tile_data(tile_id: str):
     if tile_id in _tile_cache:
         return _tile_cache[tile_id]
@@ -277,8 +365,9 @@ def get_tile_data(tile_id: str):
     features_mapped = F.normalize(features_tensor, dim=1).numpy()
 
     _tile_cache[tile_id] = {
-        'xyz': xyz_mapped,
-        'features': features_mapped
+        'xyz_mapped': xyz_mapped,
+        'features': features_mapped,
+        'xyz_full': xyz_viewer
     }
     
     print(f"Tile {tile_id} cached successfully: {len(idx)} valid points.")
@@ -296,7 +385,7 @@ async def encode_obb(request: OBBEncodeRequest):
     
     try:
         tile_data = get_tile_data(tile_id)
-        coords = tile_data['xyz']
+        coords = tile_data['xyz_mapped']
         features = tile_data['features']
 
         cx, cy, cz = (bbox_min + bbox_max) / 2.0
@@ -348,7 +437,7 @@ async def get_cluster_points(tile: str, clusters: str):
         
     try:
         tile_data = get_tile_data(tile)
-        coords = tile_data['xyz']
+        coords = tile_data['xyz_full']
         
         result_dict = {}
         for entity_id in entity_ids:

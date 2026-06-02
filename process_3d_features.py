@@ -6,7 +6,7 @@ from plyfile import PlyData
 from tqdm import tqdm
 
 DATA_ROOT = "/rcp-scratch/iccluster040_scratch/students/moudden/bachelor_project/renders"  
-OUTPUT_FILE = "./timeatlas_3d_vectors.parquet"
+OUTPUT_FILE = "./clustered_3d_vectors.parquet"
 LEVELS = [0, 1, 2]     
 
 def process_all_buildings():
@@ -56,25 +56,35 @@ def process_all_buildings():
             if len(valid_vectors) > 0:
                 mean_vector = np.mean(valid_vectors, axis=0).astype(np.float32).tolist()
                 
-                records.append({
+                record = {
                     "edifici_id": edifici_id,
                     "entity_id": entity_id,
                     "level": level_num,
                     "vector": mean_vector,
-                    "point_indices": point_indices
-                })
+                    "point_indices": point_indices,
+                }
+
+                if level_num >= 1:
+                    contained_l0 = group_df['label_l0'].unique().tolist()
+                    record["children_l0"] = [f"L0_{x}" for x in contained_l0]
+                
+                if level_num == 2:
+                    contained_l1 = group_df['label_l1'].unique().tolist()
+                    record["children_l1"] = [f"L1_{x}" for x in contained_l1]
+
+                records.append(record)
 
         # --- Process Level 0 Entities ---
         for l0_val, group in df_points.groupby('label_l0'):
             extract_and_append(group, f"L0_{l0_val}", 0)
 
         # --- Process Level 1 Entities ---
-        for (l0_val, l1_val), group in df_points.groupby(['label_l0', 'label_l1']):
-            extract_and_append(group, f"L0_{l0_val}_L1_{l1_val}", 1)
+        for l1_val, group in df_points.groupby('label_l1'):
+            extract_and_append(group, f"L1_{l1_val}", 1)
 
         # --- Process Level 2 Entities ---
-        for (l0_val, l1_val, l2_val), group in df_points.groupby(['label_l0', 'label_l1', 'label_l2']):
-            extract_and_append(group, f"L0_{l0_val}_L1_{l1_val}_L2_{l2_val}", 2)
+        for l2_val, group in df_points.groupby('label_l2'):
+            extract_and_append(group, f"L2_{l2_val}", 2)
 
     print(f"\nAggregated {len(records)} valid entities. Converting to DataFrame...")
     df_output = pd.DataFrame(records)

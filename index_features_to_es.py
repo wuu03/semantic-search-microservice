@@ -97,6 +97,8 @@ def create_index(es: Elasticsearch, index_name: str, dims: int, recreate: bool) 
                 "cluster_id": {"type": "integer"},
                 "entity_id": {"type": "keyword"},
                 "level": {"type": "integer"},
+                "children_l0": {"type": "keyword"},
+                "children_l1": {"type": "keyword"},
                 "historical_record_uuid": {"type": "keyword"},
                 "dataset_slug": {"type": "keyword"},
                 "date_range": {"type": "date_range"},
@@ -192,6 +194,15 @@ def generate_image_actions(jsonl_path: Path, index_name: str, image_uuid_mapping
 def generate_3d_actions(parquet_path: Path, npy_dir: Path | None, index_name: str, edifici_mapping: dict, laravel_metadata: dict):
     processed_global_edifici = set()
 
+    def safe_extract_list(val):
+        if val is None:
+            return []
+        if isinstance(val, (list, np.ndarray)):
+            return list(val)
+        if pd.isna(val):
+            return []
+        return [val]
+
     if parquet_path.exists():
         df = pd.read_parquet(parquet_path)
         for _, row in df.iterrows():
@@ -199,6 +210,8 @@ def generate_3d_actions(parquet_path: Path, npy_dir: Path | None, index_name: st
             entity_id = row["entity_id"]
             level = int(row["level"])
             cluster_vec = row["vector"].tolist() if hasattr(row["vector"], "tolist") else list(row["vector"])
+            children_l0 = safe_extract_list(row.get("children_l0"))
+            children_l1 = safe_extract_list(row.get("children_l1"))
             mapping_val = edifici_mapping.get(edifici_id)
             hr_uuid = mapping_val if isinstance(mapping_val, str) else (mapping_val.get("uuid") if isinstance(mapping_val, dict) else None)
 
@@ -241,6 +254,8 @@ def generate_3d_actions(parquet_path: Path, npy_dir: Path | None, index_name: st
                     "edifici_id": edifici_id,
                     "entity_id": entity_id,
                     "level": level,
+                    "children_l0": children_l0,
+                    "children_l1": children_l1,
                     "vector": cluster_vec,
                     **base_meta
                 },

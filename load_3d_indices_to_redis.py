@@ -1,4 +1,4 @@
-# python load_3d_indices_to_redis.py --parquet ./timeatlas_3d_vectors.parquet --redis_url redis://localhost:6379/0 --key_prefix edifici_fm --overwrite
+# python load_3d_indices_to_redis.py --parquet ./clustered_3d_vectors.parquet --redis_url redis://localhost:6379/0 --key_prefix edifici_fm --overwrite
 import argparse
 import zlib
 from pathlib import Path
