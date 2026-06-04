@@ -170,7 +170,6 @@ Renders a binary cluster mask overlay highlighting the regions corresponding to 
 | Model | Role |
 |-------|------|
 | **Talk2DINOv3** | Primary vision-language encoder. Maps text and image inputs into a shared 1024-dimensional embedding space via DINOv3 patch features aligned to language through Talk2DINO. Used for all text, image, and anchor-based query encoding. |
-| **RADSeg** | Region-aware semantic segmentation. Applied during the offline indexing phase (not at query time) to partition images into semantically coherent cluster regions, each represented by a mean-pooled feature vector. Enables sub-image region search and heatmap overlay rendering. |
 
 Model weights are loaded at service startup. The service requires a CUDA-capable GPU for production inference; CPU fallback is available but significantly slower.
 
@@ -210,6 +209,7 @@ The offline indexing pipeline reads these files, computes cluster vectors via me
 - Python 3.10+
 - CUDA-capable GPU (recommended)
 - Redis instance
+- ElasticSearch instance
 - Access to pre-computed feature files (`.pt`, `.ply`, `.npy`)
 
 ### Installation
@@ -228,9 +228,10 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` and set the following:
 
 ```env
-REDIS_HOST=localhost
+SERVER_IP=localhost
 REDIS_PORT=6379
-DATA_ROOT=/path/to/3d/tile/features
+RENDERS_ROOT=/path/to/3d/tile/features
+ASSETS_ROOT=/path/to/3d/tile/models
 ```
 
 ### Running
@@ -270,7 +271,7 @@ semantic-search-microservice/
 The following files were created or updated by the author as part of the integration work:
 `main.py` (API endpoints and rendering logic), `index_features_to_es.py`, `process_3d_features.py`, `load_featuremaps_to_redis.py`, `load_3d_indices_to_redis.py`.
 
-Model backend files (`vl_backends.py`, `test_es_visual_search.py`, `batch_extract_features.py`, `demo_talk2dino_v2_single_image.py`) were provided by collaborating team members responsible for model configuration and evaluation, and are included here to make the service self-contained and runnable.
+Model backend files (`vl_backends.py`, `test_es_visual_search.py`, `batch_extract_features.py`, `demo_talk2dino_v2_single_image.py`) were provided by collaborating team members responsible for model configuration and evaluation (some modified), and are included here to make the service self-contained and runnable.
 
 ---
  
@@ -336,16 +337,38 @@ The JSONL file is the primary input to both `index_features_to_es.py` (vector in
 - `cluster_id_map` — 2D pixel-level array mapping each pixel to its cluster ID; used by `load_featuremaps_to_redis.py` to build the heatmap overlay lookup table stored in Redis
 - `feature_map_size` — `[height, width]` of the cluster ID map in feature space
 
-### 3D model features (for indexing and query-time rendering)
-
-| File | Format | Description | Produced by |
-|------|--------|-------------|-------------|
-| `{edifici_id}/3D/{edifici_id}_DINOv3_fused_features.pt` | PyTorch tensor | Per-point DINOv3 feature vectors (`feat_bank`) and valid point indices (`point_ids`) | Talk2DINOv3 3D encoding pipeline (team) |
-| `{edifici_id}/3D/partition_level_{0,1,2}.ply` | PLY | Point cloud with semantic partition labels at three granularity levels | 3D segmentation pipeline (team) |
-| `{edifici_id}/3D/{edifici_id}_DINOv3_global_embedding.npy` | NumPy array | Pre-computed global embedding for the full building model | Talk2DINOv3 3D encoding pipeline (team) |
-| `clustered_3d_vectors.parquet` | Parquet (snappy) | `process_3d_features.py` (author) |
-
-The `.pt`, `.ply`, and `.npy` files are inputs to `process_3d_features.py`, which aggregates them into the Parquet file. The Parquet file is then consumed by `index_features_to_es.py` for 3D vector ingestion into Elasticsearch. Each row in the Parquet file represents one entity at one granularity level:
+### 3D model features and point cloud data
+ 
+All 3D-related files are organised per building under a shared `RENDERS_ROOT` directory, with additional viewer assets under `ASSETS_ROOT`. Both paths are configured via environment variables.
+ 
+**Per-building files** (under `RENDERS_ROOT/{edifici_id}/3D/`):
+ 
+| File | Format | Used by | Description |
+|------|--------|---------|-------------|
+| `{edifici_id}.las` | LAS | `get_tile_data`, `/api/encode-obb`, `/api/cluster-points` | Raw point cloud with XYZ coordinates; offset-corrected and axis-remapped at load time for viewer alignment |
+| `{edifici_id}_DINOv3_filled_features.pt` | PyTorch tensor | `get_tile_data` (preferred) | Per-point DINOv3 features with interpolated coverage for points lacking direct encoder output |
+| `{edifici_id}_DINOv3_fused_features.pt` | PyTorch tensor | `get_tile_data` (fallback), `process_3d_features.py` | Per-point DINOv3 feature vectors; used when filled variant is absent |
+| `partition_level_{0,1,2}.ply` | PLY | `process_3d_features.py` | Point cloud with semantic partition labels at three granularity levels |
+| `{edifici_id}_DINOv3_global_embedding.npy` | NumPy array | `index_features_to_es.py` | Pre-computed global embedding for the full building model |
+| `center_offset.npy` | NumPy array | `get_tile_data` (fallback) | XYZ centroid offset for coordinate normalisation; used only when tile meta JSON is absent |
+ 
+The `filled` feature variant is loaded preferentially over `fused` when both are present. Loaded tile data — XYZ coordinates, mapped feature vectors, and the full point array — is held in a process-level cache keyed by `tile_id` to avoid repeated disk reads across requests.
+ 
+**Viewer asset files** (under `ASSETS_ROOT/`):
+ 
+| File | Format | Used by | Description |
+|------|--------|---------|-------------|
+| `{edifici_id}_tile_meta.json` | JSON | `get_tile_data` | Tile metadata including `center_offset` array; preferred over `center_offset.npy` when present |
+| `{edifici_id}_*.ply` | PLY | Frontend 3D viewer | Downsampled point cloud model served to the browser for interactive rendering |
+| `{edifici_id}_*.json` | JSON | Frontend 3D viewer | Viewer scene metadata (entity layout, bounding volumes, etc.) |
+ 
+**Intermediate output** (produced by `process_3d_features.py`):
+ 
+| File | Format | Description |
+|------|--------|-------------|
+| `clustered_3d_vectors.parquet` | Parquet (snappy) | Aggregated entity-level feature vectors across all buildings; input to `index_features_to_es.py` |
+ 
+Each row in the Parquet file represents one entity at one granularity level:
  
 | Column | Type | Description |
 |--------|------|-------------|
@@ -356,16 +379,7 @@ The `.pt`, `.ply`, and `.npy` files are inputs to `process_3d_features.py`, whic
 | `point_indices` | list[int] | Indices of 3D points belonging to this entity |
 | `children_l0` | list[str] | L0 child entity IDs (present for level ≥ 1) |
 | `children_l1` | list[str] | L1 child entity IDs (present for level 2 only) |
-
-### Platform metadata exports
  
-| File | Format | Description |
-|------|--------|-------------|
-| `edifici_mapping.json` | JSON | Maps each `edifici_id` to its historical record UUID in the Time Atlas database |
-| `historical_metadata.json` | JSON | Maps each record UUID to its spatiotemporal metadata: `dataset_slug`, `date_range`, and `poi_locations` (geographic coordinates) |
- 
-These files are exported from the Time Atlas Laravel backend and are used by `index_features_to_es.py` to attach platform metadata to each indexed vector document. 
-
 ---
 
 ## Related Components
