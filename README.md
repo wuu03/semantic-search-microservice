@@ -360,7 +360,6 @@ The `filled` feature variant is loaded preferentially over `fused` when both are
 |------|--------|---------|-------------|
 | `{edifici_id}_tile_meta.json` | JSON | `get_tile_data` | Tile metadata including `center_offset` array; preferred over `center_offset.npy` when present |
 | `{edifici_id}_*.ply` | PLY | Frontend 3D viewer | Downsampled point cloud model served to the browser for interactive rendering |
-| `{edifici_id}_*.json` | JSON | Frontend 3D viewer | Viewer scene metadata (entity layout, bounding volumes, etc.) |
  
 **Intermediate output** (produced by `process_3d_features.py`):
  
@@ -391,8 +390,8 @@ This microservice is one component of a larger integration. The full system comp
 | **This microservice** | FastAPI / Python | This repository |
 | **API gateway** | Laravel (PHP) | Private — contact Time Atlas team |
 | **Frontend** | Nuxt 3 / Vue | Private — contact Time Atlas team |
-| **Vector index** | Elasticsearch | Deployed separately |
-| **Offline indexing pipeline** | Python | Private — contact Time Atlas team |
+| **Vector index** | Elasticsearch | Deployed in Time Atlas backend Docker |
+| **Offline indexing pipeline** | Python | This repository |
 | **3D point cloud viewer** | Three.js | Private — contact Time Atlas team |
 
 For access to the frontend and backend integration code, or for questions about the broader Time Atlas platform, please contact the Time Atlas research team at EPFL.
@@ -401,4 +400,4 @@ For access to the frontend and backend integration code, or for questions about 
 
 ## Acknowledgements
 
-This microservice was developed as part of a bachelor-level integration project at EPFL. The semantic encoder models (Talk2DINOv3, RADSeg) were configured and evaluated by collaborating team members. The Time Atlas platform is a research initiative of the [Digital Humanities Lab](https://www.epfl.ch/labs/dhlab/) at EPFL.
+This microservice was developed as part of a master-level integration project at EPFL. The semantic encoder models (Talk2DINOv3, RADSeg) were configured and evaluated by collaborating team members. The Time Atlas platform is a research initiative of the [Digital Humanities Lab](https://www.epfl.ch/labs/dhlab/) at EPFL.
