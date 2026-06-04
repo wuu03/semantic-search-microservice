@@ -258,12 +258,7 @@ semantic-search-microservice/
 ├── load_featuremaps_to_redis.py # Image cluster-to-pixel maps → Redis
 ├── load_3d_indices_to_redis.py  # 3D entity-to-point indices → Redis
 │
-├── # Metadata exports (from Laravel backend, not tracked by git)
-├── edifici_mapping.json         # edifici_id → historical record UUID mapping
-├── historical_metadata.json     # UUID → spatiotemporal metadata (dataset, date range, POI)
-│
 ├── # Utilities
-├── plycheck.py                  # PLY partition file validation utility
 └── test_es_visual_search.py     # End-to-end search pipeline test script
 │
 └── # Environment and dependencies
@@ -319,7 +314,7 @@ Several large data files are required to run the full pipeline but are not track
 | `features_*.jsonl` | JSONL | One record per image, containing `image_id`, `image_embedding` (global), `metadata_embedding`, and `clusters` (list of `{cluster_id, v}` dicts) | RADSeg + Talk2DINOv3 encoding pipeline (team) |
 | `images_metadata.csv` | CSV | Maps image filenames to historical record UUIDs | Exported from Time Atlas database |
 
-The JSONL file is the primary input to `index_features_to_es.py`. Each line has the following structure:
+The JSONL file is the primary input to both `index_features_to_es.py` (vector indexing) and `load_featuremaps_to_redis.py` (feature map ingestion). Each line represents one image record with the following fields:
 
 ```json
 {
@@ -329,9 +324,17 @@ The JSONL file is the primary input to `index_features_to_es.py`. Each line has 
   "clusters": [
     { "cluster_id": 0, "v": [float, ...] },
     { "cluster_id": 1, "v": [float, ...] }
-  ]
+  ],
+  "cluster_id_map": [[int, ...], ...],
+  "feature_map_size": [height, width]
 }
 ```
+
+- `image_embedding` — global Talk2DINOv3 embedding for the full image (float[1024])
+- `metadata_embedding` — embedding derived from the record's textual metadata (float[1024])
+- `clusters` — per-cluster mean-pooled vectors produced by RADSeg semantic segmentation
+- `cluster_id_map` — 2D pixel-level array mapping each pixel to its cluster ID; used by `load_featuremaps_to_redis.py` to build the heatmap overlay lookup table stored in Redis
+- `feature_map_size` — `[height, width]` of the cluster ID map in feature space
 
 ### 3D model features (for indexing and query-time rendering)
 
@@ -340,12 +343,28 @@ The JSONL file is the primary input to `index_features_to_es.py`. Each line has 
 | `{edifici_id}/3D/{edifici_id}_DINOv3_fused_features.pt` | PyTorch tensor | Per-point DINOv3 feature vectors (`feat_bank`) and valid point indices (`point_ids`) | Talk2DINOv3 3D encoding pipeline (team) |
 | `{edifici_id}/3D/partition_level_{0,1,2}.ply` | PLY | Point cloud with semantic partition labels at three granularity levels | 3D segmentation pipeline (team) |
 | `{edifici_id}/3D/{edifici_id}_DINOv3_global_embedding.npy` | NumPy array | Pre-computed global embedding for the full building model | Talk2DINOv3 3D encoding pipeline (team) |
+| `clustered_3d_vectors.parquet` | Parquet (snappy) | `process_3d_features.py` (author) |
 
-These files are consumed by `process_3d_features.py` (offline aggregation) and loaded at query time by the `/api/encode-obb` and `/api/cluster-points` endpoints.
+The `.pt`, `.ply`, and `.npy` files are inputs to `process_3d_features.py`, which aggregates them into the Parquet file. The Parquet file is then consumed by `index_features_to_es.py` for 3D vector ingestion into Elasticsearch. Each row in the Parquet file represents one entity at one granularity level:
+ 
+| Column | Type | Description |
+|--------|------|-------------|
+| `edifici_id` | string | Building identifier |
+| `entity_id` | string | Entity label, e.g. `L0_3`, `L1_7` |
+| `level` | int | Granularity level (0 = finest, 2 = coarsest) |
+| `vector` | float[1024] | Mean-pooled DINOv3 feature vector for the entity |
+| `point_indices` | list[int] | Indices of 3D points belonging to this entity |
+| `children_l0` | list[str] | L0 child entity IDs (present for level ≥ 1) |
+| `children_l1` | list[str] | L1 child entity IDs (present for level 2 only) |
 
-### Point cloud models (for 3D viewer)
-
-Raw LAS point cloud files (`.las`) for each building are served separately to the frontend 3D viewer and are not consumed directly by this microservice. They are stored on the project's shared storage and accessed via the Time Atlas platform infrastructure.
+### Platform metadata exports
+ 
+| File | Format | Description |
+|------|--------|-------------|
+| `edifici_mapping.json` | JSON | Maps each `edifici_id` to its historical record UUID in the Time Atlas database |
+| `historical_metadata.json` | JSON | Maps each record UUID to its spatiotemporal metadata: `dataset_slug`, `date_range`, and `poi_locations` (geographic coordinates) |
+ 
+These files are exported from the Time Atlas Laravel backend and are used by `index_features_to_es.py` to attach platform metadata to each indexed vector document. 
 
 ---
 
