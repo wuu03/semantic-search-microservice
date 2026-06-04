@@ -1,208 +1,371 @@
-# Unified Image Search Stack
+# Semantic Search Microservice
 
-This branch keeps a single, compact workflow for postcard image search with three interchangeable vision-language backends:
+> **Part of the [Time Atlas](https://timeatlas.epfl.ch) platform** — an interactive historical-geographical platform integrating spatial and temporal dimensions to make historical records searchable across space and time.
 
-- `radseg`
-- `tips`
-- `talk2dino`
+This repository contains the Python microservice that powers the multimodal semantic search capability of the Time Atlas platform. It exposes a set of HTTP endpoints for encoding queries (text, images, image regions, and 3D point cloud selections) into dense vector representations, and for rendering score-proportional visual overlays over search results.
 
-The core pipeline is:
+> **Note on repository scope:** The frontend (Nuxt 3) and backend API gateway (Laravel) code that integrates this microservice into the Time Atlas platform reside in the project's private monorepo. For access, please contact the Time Atlas team at EPFL.
 
-1. Extract clustered dense features from images
-2. Store cluster vectors in Elasticsearch
-3. Store `cluster_id_map` feature maps in Redis
-4. Run text search with localization overlays
-5. Evaluate search quality with metadata-derived weak labels and per-query visual reports
+---
 
-## Kept entrypoints
+## Table of Contents
 
-- [D:\RADSeg\vl_backends.py](D:\RADSeg\vl_backends.py): unified backend wrappers
-- [D:\RADSeg\batch_extract_features.py](D:\RADSeg\batch_extract_features.py): batch clustered feature extraction
-- [D:\RADSeg\index_features_to_es.py](D:\RADSeg\index_features_to_es.py): index cluster vectors into Elasticsearch
-- [D:\RADSeg\load_featuremaps_to_redis.py](D:\RADSeg\load_featuremaps_to_redis.py): load feature maps into Redis
-- [D:\RADSeg\test_es_visual_search.py](D:\RADSeg\test_es_visual_search.py): search demo with heatmap/cluster visualization
-- [D:\RADSeg\evaluate_search_with_metadata.py](D:\RADSeg\evaluate_search_with_metadata.py): quantitative evaluation + query reports
-- [D:\RADSeg\docker-compose.yml](D:\RADSeg\docker-compose.yml): single local stack for Elasticsearch, Redis, Kibana
+- [Project Context](#project-context)
+- [Role in the System](#role-in-the-system)
+- [Architecture](#architecture)
+- [Endpoints](#endpoints)
+- [Models](#models)
+- [Data Storage](#data-storage)
+- [Repository Structure](#repository-structure)
+- [External Data](#external-data)
+- [Setup](#setup)
+- [Related Components](#related-components)
 
-## 1. Start local services
+---
+
+## Project Context
+
+Time Atlas aggregates over 182,000 historical records — including photographs, cadastral documents, paintings, and 3D architectural reconstructions — anchored to geographic coordinates and historical time periods. The platform's original retrieval system was limited to keyword-based search, which cannot accommodate the visual and geometric nature of image and 3D data, nor support cross-modal queries such as searching by uploaded image or by selecting a region of a point cloud.
+
+This microservice was developed as part of a full-stack integration effort to add **multimodal semantic search** to the platform, supporting five query modalities:
+
+| Modality | Description |
+|----------|-------------|
+| Text query | Natural language search over all historical records |
+| Image upload | Find visually similar records by uploading an image |
+| Image region crop | Search using a user-selected sub-region of a displayed image |
+| POI anchor record | Use an existing record as a search anchor via its global embedding |
+| 3D OBB selection | Search using a spatial bounding box drawn over a 3D point cloud model |
+
+---
+
+## Role in the System
+
+The microservice sits between the Laravel API gateway and the Elasticsearch vector index, serving as the **stateless encoder engine** in the search pipeline:
+
+```
+Nuxt 3 frontend
+      │
+      ▼
+Nitro BFF proxy
+      │
+      ▼
+Laravel API gateway  ──────────────────────►  Elasticsearch
+      │                  script_score query     (vector index)
+      │                  + geo ranking
+      ▼
+FastAPI microservice   ◄──────────────────── Redis
+  (this repository)        feature map cache
+```
+
+For each incoming search request, the Laravel gateway forwards the query payload to this service, which:
+
+1. Encodes the input into a normalised dense vector using the appropriate model
+2. Returns the query vector (and optional negative contrast vectors) to Laravel
+3. Laravel then executes the Elasticsearch `script_score` query using the returned vector
+
+For visualisation requests, the service additionally reads pre-computed feature maps from Redis and renders RGBA PNG overlays that are streamed back to the frontend.
+
+---
+
+## Architecture
+
+The service is implemented with **FastAPI** and designed to be entirely stateless with respect to request handling. Model weights are loaded into GPU memory once at startup and held warm for the lifetime of the process, ensuring that per-request latency reflects only forward pass cost rather than model loading overhead.
+
+3D tile data (LAS point clouds and DINOv3 feature tensors) is loaded lazily on first access and cached in a process-level dictionary, avoiding repeated disk reads for frequently queried tiles.
+
+```
+main.py
+├── /api/encode              # Text and image encoding (Talk2DINOv3)
+├── /api/encode-obb          # 3D oriented bounding box encoding
+├── /api/cluster-points      # 3D entity point coordinate lookup
+├── /api/heatmap/{image_id}  # Score-proportional RGBA heatmap rendering
+└── /api/mask/{image_id}     # Binary cluster mask rendering (fallback)
+```
+
+---
+
+## Endpoints
+
+### `POST /api/encode`
+
+Encodes a text string or image into a dense query vector.
+
+**Request:** multipart/form-data
+| Field | Type | Description |
+|-------|------|-------------|
+| `query_image` | file (optional) | Image to encode |
+| `query_text` | string (optional) | Text query to encode |
+| `negative_text` | string | Negative contrast prompt (default: `"background"`) |
+
+At least one of `query_image` or `query_text` must be present.
+
+**Response:**
+```json
+{
+  "query_type": "image" | "text",
+  "vector": [float, ...],
+  "negative_vectors": [[float, ...], ...]
+}
+```
+
+---
+
+### `POST /api/encode-obb`
+
+Encodes a 3D oriented bounding box selection by mean-pooling the DINOv3 features of all points within the specified region.
+
+**Request:** JSON
+```json
+{
+  "tile_id": "edifici_XXXX",
+  "bbox_min": [x, y, z],
+  "bbox_max": [x, y, z],
+  "rotation": [[...], [...], [...]]
+}
+```
+
+**Response:** same structure as `/api/encode` with `query_type: "3d_obb"`
+
+---
+
+### `GET /api/cluster-points`
+
+Returns the 3D coordinates of points belonging to specified entity clusters within a tile, used by the frontend 3D viewer for point highlight rendering.
+
+**Query params:** `tile`, `clusters` (comma-separated entity IDs), `scores` (comma-separated)
+
+**Response:**
+```json
+{
+  "xyz": [[x, y, z], ...],
+  "scores": [float, ...]
+}
+```
+
+---
+
+### `GET /api/heatmap/{image_id}`
+
+Renders a score-proportional RGBA heatmap overlay for an image result, using the TURBO colormap with Gaussian smoothing.
+
+**Query params:** `clusters`, `w`, `h`, `g_max`, `g_min`
+
+**Response:** `image/png`
+
+---
+
+### `GET /api/mask/{image_id}`
+
+Renders a binary cluster mask overlay highlighting the regions corresponding to specified cluster IDs.
+
+**Query params:** `clusters`, `w`, `h`
+
+**Response:** `image/png`
+
+---
+
+## Models
+
+| Model | Role |
+|-------|------|
+| **Talk2DINOv3** | Primary vision-language encoder. Maps text and image inputs into a shared 1024-dimensional embedding space via DINOv3 patch features aligned to language through Talk2DINO. Used for all text, image, and anchor-based query encoding. |
+| **RADSeg** | Region-aware semantic segmentation. Applied during the offline indexing phase (not at query time) to partition images into semantically coherent cluster regions, each represented by a mean-pooled feature vector. Enables sub-image region search and heatmap overlay rendering. |
+
+Model weights are loaded at service startup. The service requires a CUDA-capable GPU for production inference; CPU fallback is available but significantly slower.
+
+---
+
+## Data Storage
+
+The service relies on two external data stores, both populated during the **offline indexing phase**:
+
+### Redis
+
+Pre-computed feature maps are stored in Redis for fast access at query time, avoiding repeated model inference during result rendering:
+
+| Key pattern | Contents |
+|-------------|----------|
+| `image_fm:{image_id}` | Cluster-to-pixel mapping for image records (zlib-compressed numpy array) |
+| `edifici_fm:{edifici_id}` | Entity-to-point-index mapping for 3D models |
+
+### Disk (tile feature files)
+
+3D tile data is stored as files on disk:
+
+| File | Contents |
+|------|----------|
+| `{edifici_id}_DINOv3_fused_features.pt` | Per-point DINOv3 feature vectors for a building tile |
+| `partition_level_{0,1,2}.ply` | Point cloud with semantic partition labels at three levels of granularity |
+| `{edifici_id}_DINOv3_global_embedding.npy` | Pre-computed global embedding for the full building model |
+
+The offline indexing pipeline reads these files, computes cluster vectors via mean pooling, and writes all embeddings to Elasticsearch. See the [External Data](#external-data) section for details on required input file formats.
+
+---
+
+## Setup
+
+### Requirements
+
+- Python 3.10+
+- CUDA-capable GPU (recommended)
+- Redis instance
+- Access to pre-computed feature files (`.pt`, `.ply`, `.npy`)
+
+### Installation
 
 ```bash
-docker compose up -d
+git clone https://github.com/wuu03/semantic-search-microservice.git
+cd semantic-search-microservice
 ```
-
-Services:
-
-- Elasticsearch: `http://localhost:9200`
-- Redis: `redis://localhost:6379/0`
-- Kibana: `http://localhost:5601`
-
-## 2. Extract features
-
-Example with `radseg`:
 
 ```bash
-python batch_extract_features.py \
-  --backend radseg \
-  --input_dir images \
-  --output_file features_radseg.jsonl \
-  --num_clusters 10 \
-  --min_cluster_pixels 16 \
-  --merge_similarity 0.97 \
-  --device cuda
+pip install -r requirements.txt
 ```
 
-Example with `tips`:
+### Configuration
+
+Copy `.env.example` to `.env` and set the following:
+
+```env
+REDIS_HOST=localhost
+REDIS_PORT=6379
+DATA_ROOT=/path/to/3d/tile/features
+```
+
+### Running
 
 ```bash
-python batch_extract_features.py \
-  --backend tips \
-  --model_id google/tipsv2-b14 \
-  --input_dir images \
-  --output_file features_tips.jsonl \
-  --num_clusters 10 \
-  --min_cluster_pixels 16 \
-  --merge_similarity 0.97 \
-  --device cuda
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-Example with `talk2dino`:
+The service will load model weights on startup. First startup may take 30–60 seconds depending on GPU and model size.
 
-```bash
-python batch_extract_features.py \
-  --backend talk2dino \
-  --input_dir images \
-  --output_file features_talk2dino.jsonl \
-  --num_clusters 10 \
-  --min_cluster_pixels 16 \
-  --merge_similarity 0.97 \
-  --device cuda
+---
+
+## Repository Structure
+
+```
+semantic-search-microservice/
+│
+├── main.py                      # FastAPI application — encoding and rendering endpoints
+├── vl_backends.py               # Vision-language model backend wrappers (Talk2DINOv3)
+├── hubconf.py                   # Model hub configuration
+│
+├── # Indexing and data ingestion
+├── index_features_to_es.py      # Unified vector indexing pipeline → Elasticsearch
+├── process_3d_features.py       # 3D entity feature aggregation → Parquet
+├── load_featuremaps_to_redis.py # Image cluster-to-pixel maps → Redis
+├── load_3d_indices_to_redis.py  # 3D entity-to-point indices → Redis
+│
+├── # Metadata exports (from Laravel backend, not tracked by git)
+├── edifici_mapping.json         # edifici_id → historical record UUID mapping
+├── historical_metadata.json     # UUID → spatiotemporal metadata (dataset, date range, POI)
+│
+├── # Utilities
+├── plycheck.py                  # PLY partition file validation utility
+└── test_es_visual_search.py     # End-to-end search pipeline test script
+│
+└── # Environment and dependencies
+    └── requirements.txt         # Pip dependencies
 ```
 
-Each JSONL row contains:
+### Authorship note
 
-- `image_id`
-- `feature_map_size`
-- `cluster_id_map`
-- `clusters: [{cluster_id, v}]`
+The following files were created or updated by the author as part of the integration work:
+`main.py` (API endpoints and rendering logic), `index_features_to_es.py`, `process_3d_features.py`, `load_featuremaps_to_redis.py`, `load_3d_indices_to_redis.py`.
 
-## 3. Load feature maps into Redis
+Model backend files (`vl_backends.py`, `test_es_visual_search.py`, `batch_extract_features.py`, `demo_talk2dino_v2_single_image.py`) were provided by collaborating team members responsible for model configuration and evaluation, and are included here to make the service self-contained and runnable.
 
-```bash
-python load_featuremaps_to_redis.py \
-  --jsonl features_radseg.jsonl \
-  --redis_url redis://localhost:6379/0 \
-  --key_prefix radseg_fm
+---
+ 
+### Third-party code
+ 
+The following files originate from the [RADSeg](https://github.com/RADSeg-OVSS/RADSeg) official code release (Alama et al., CVPR 2026, arXiv:2511.19704) and were provided to this project by collaborating team members, with minor modifications for integration purposes:
+ 
+| File | Origin |
+|------|--------|
+| `radseg/base.py` | RADSeg official release |
+| `radseg/prompt_templates.py` | RADSeg official release |
+| `radseg/radseg.py` | RADSeg official release (modified) |
+| `radseg/sam_utils.py` | RADSeg official release |
+| `hubconf.py` | RADSeg / AM-RADIO official release |
+ 
+If you use RADSeg in your work, please cite the original authors:
+ 
+```bibtex
+@InProceedings{Alama_2026_CVPR,
+  author    = {Alama, Omar and Jariwala, Darshil and Bhattacharya, Avigyan and
+               Kim, Seungchan and Wang, Wenshan and Scherer, Sebastian},
+  title     = {RADSeg: Unleashing Parameter and Compute Efficient Zero-Shot
+               Open-Vocabulary Segmentation Using Agglomerative Models},
+  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
+               Pattern Recognition (CVPR) Findings},
+  year      = {2026},
+  pages     = {9294--9304}
+}
 ```
 
-## 4. Index vectors into Elasticsearch
+---
 
-```bash
-python index_features_to_es.py \
-  --jsonl features_radseg.jsonl \
-  --es_host http://localhost:9200 \
-  --index radseg_images \
-  --metadata_csv images_metadata.csv \
-  --recreate
+## External Data
+
+Several large data files are required to run the full pipeline but are not tracked in this repository. The table below describes each category, its format, and how it is produced or obtained.
+
+### Image features (for indexing)
+
+| File | Format | Description | Produced by |
+|------|--------|-------------|-------------|
+| `features_*.jsonl` | JSONL | One record per image, containing `image_id`, `image_embedding` (global), `metadata_embedding`, and `clusters` (list of `{cluster_id, v}` dicts) | RADSeg + Talk2DINOv3 encoding pipeline (team) |
+| `images_metadata.csv` | CSV | Maps image filenames to historical record UUIDs | Exported from Time Atlas database |
+
+The JSONL file is the primary input to `index_features_to_es.py`. Each line has the following structure:
+
+```json
+{
+  "image_id": "example_image.jpg",
+  "image_embedding": [float, ...],
+  "metadata_embedding": [float, ...],
+  "clusters": [
+    { "cluster_id": 0, "v": [float, ...] },
+    { "cluster_id": 1, "v": [float, ...] }
+  ]
+}
 ```
 
-The vector dimension is inferred automatically from the JSONL file.
-If `--metadata_csv` is provided, every cluster document also stores `final_place`,
-`landmarks_identified`, `description`, `transcription`, city/country, and date.
+### 3D model features (for indexing and query-time rendering)
 
-## 5. Run search demo
+| File | Format | Description | Produced by |
+|------|--------|-------------|-------------|
+| `{edifici_id}/3D/{edifici_id}_DINOv3_fused_features.pt` | PyTorch tensor | Per-point DINOv3 feature vectors (`feat_bank`) and valid point indices (`point_ids`) | Talk2DINOv3 3D encoding pipeline (team) |
+| `{edifici_id}/3D/partition_level_{0,1,2}.ply` | PLY | Point cloud with semantic partition labels at three granularity levels | 3D segmentation pipeline (team) |
+| `{edifici_id}/3D/{edifici_id}_DINOv3_global_embedding.npy` | NumPy array | Pre-computed global embedding for the full building model | Talk2DINOv3 3D encoding pipeline (team) |
 
-```bash
-python test_es_visual_search.py "arched bridge over water" \
-  --backend radseg \
-  --device cuda \
-  --es_host http://localhost:9200 \
-  --es_index radseg_images \
-  --redis_url redis://localhost:6379/0 \
-  --redis_key_prefix radseg_fm \
-  --image_root images \
-  --negative_text "background, sky, clouds, text, border, trees, road, people" \
-  --metadata_csv images_metadata.csv \
-  --metadata_filter auto \
-  --top_k 6 \
-  --candidate_k 120 \
-  --temperature 10
-```
+These files are consumed by `process_3d_features.py` (offline aggregation) and loaded at query time by the `/api/encode-obb` and `/api/cluster-points` endpoints.
 
-Notes:
+### Point cloud models (for 3D viewer)
 
-- If `--output_path` is omitted, a file is auto-generated under `scratch/`
-- `--result_mode image` returns top images
-- `--result_mode cluster` returns top clusters, allowing multiple clusters from one image
-- `--metadata_filter auto` treats broad concepts like `river` or `church` as pure visual search, but treats specific names like `Charles Bridge` or `Piazza San Marco` as metadata-filtered visual reranking.
+Raw LAS point cloud files (`.las`) for each building are served separately to the frontend 3D viewer and are not consumed directly by this microservice. They are stored on the project's shared storage and accessed via the Time Atlas platform infrastructure.
 
-## 6. Evaluate search quality
+---
 
-The evaluator uses [D:\RADSeg\images_metadata.csv](D:\RADSeg\images_metadata.csv) as weak supervision.
+## Related Components
 
-It produces:
+This microservice is one component of a larger integration. The full system comprises:
 
-- image-level metrics
-- cluster-level metrics
-- query-level ground truth files
-- per-query visualization images
-- a query browser report in Markdown and HTML
+| Component | Technology | Location |
+|-----------|-----------|----------|
+| **This microservice** | FastAPI / Python | This repository |
+| **API gateway** | Laravel (PHP) | Private — contact Time Atlas team |
+| **Frontend** | Nuxt 3 / Vue | Private — contact Time Atlas team |
+| **Vector index** | Elasticsearch | Deployed separately |
+| **Offline indexing pipeline** | Python | Private — contact Time Atlas team |
+| **3D point cloud viewer** | Three.js | Private — contact Time Atlas team |
 
-Example:
+For access to the frontend and backend integration code, or for questions about the broader Time Atlas platform, please contact the Time Atlas research team at EPFL.
 
-```bash
-python evaluate_search_with_metadata.py \
-  --es_host http://localhost:9200 \
-  --es_index radseg_images \
-  --backend radseg \
-  --device cuda \
-  --redis_url redis://localhost:6379/0 \
-  --redis_key_prefix radseg_fm \
-  --image_root images \
-  --candidate_k 120 \
-  --temperature 10 \
-  --negative_text "background, sky, clouds, text, border, trees, road, people" \
-  --visualize_queries all \
-  --visualize_result_mode image \
-  --visualize_top_k 6
-```
+---
 
-Outputs go to:
+## Acknowledgements
 
-```text
-scratch/eval_<backend>_<index>/
-```
-
-Important files:
-
-- `summary.md`
-- `summary.json`
-- `image_level_metrics.csv`
-- `cluster_level_metrics.csv`
-- `image_level_top_hits.csv`
-- `cluster_level_top_hits.csv`
-- `query_ground_truth.json`
-- `query_ground_truth_pairs.csv`
-- `query_browser_report.html`
-- `visualizations/...`
-
-## Recommended search behavior
-
-This codebase supports two query families:
-
-1. General concept queries
-   - `river`
-   - `bridge`
-   - `church`
-   - `castle`
-
-2. Specific landmark queries
-   - `Piazza San Marco`
-   - `Charles Bridge`
-   - `Schloss Pyrmont`
-
-For product use, specific landmark queries should eventually combine metadata filtering with visual reranking.
-This branch implements that behavior in the demo:
-
-- General query: retrieve cluster vectors globally, then rerank with positive-vs-negative prompt scoring.
-- Specific landmark/place query: find candidate images from `landmarks_identified`, `final_place`, `description`, city/country, and transcription, then rerank only those images' clusters visually.
-- Output remains image cards with highlighted matched clusters, so a UI can show image results first and jump from the selected image to its map POI.
+This microservice was developed as part of a bachelor-level integration project at EPFL. The semantic encoder models (Talk2DINOv3, RADSeg) were configured and evaluated by collaborating team members. The Time Atlas platform is a research initiative of the [Digital Humanities Lab](https://www.epfl.ch/labs/dhlab/) at EPFL.
