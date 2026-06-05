@@ -133,15 +133,17 @@ Encodes a 3D oriented bounding box selection by mean-pooling the DINOv3 features
 
 Returns the 3D coordinates of points belonging to specified entity clusters within a tile, used by the frontend 3D viewer for point highlight rendering.
 
-**Query params:** `tile`, `clusters` (comma-separated entity IDs), `scores` (comma-separated)
-
+**Query params:** `tile` (edifici ID), `clusters` (comma-separated entity IDs)
+ 
 **Response:**
 ```json
 {
-  "xyz": [[x, y, z], ...],
-  "scores": [float, ...]
+  "L0_3": [[x, y, z], ...],
+  "L1_7": [[x, y, z], ...]
 }
 ```
+ 
+Each key is an entity ID; the value is the list of XYZ coordinates of all points belonging to that entity, read from the Redis index (`edifici_fm:{tile}:{entity_id}`) and looked up against the tile's full point array.
 
 ---
 
