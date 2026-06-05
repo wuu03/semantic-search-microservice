@@ -173,6 +173,20 @@ Renders a binary cluster mask overlay highlighting the regions corresponding to 
 
 Model weights are loaded at service startup. The service requires a CUDA-capable GPU for production inference.
 
+If you use Talk2DINOv3 in your work, please cite the original authors:
+ 
+```bibtex
+@inproceedings{barsellotti2025talking,
+  title={Talking to dino: Bridging self-supervised vision backbones
+         with language for open-vocabulary segmentation},
+  author={Barsellotti, Luca and Bianchi, Lorenzo and Messina, Nicola and Carrara, Fabio and
+          Cornia, Marcella and Baraldi, Lorenzo and Falchi, Fabrizio and Cucchiara, Rita},
+  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
+  pages={22025--22035},
+  year={2025}
+}
+```
+
 ### Earlier experimental models (not used in current pipeline)
  
 | Model | Notes |
@@ -297,15 +311,14 @@ The following files originate from the [RADSeg](https://github.com/RADSeg-OVSS/R
 If you use RADSeg in your work, please cite the original authors:
  
 ```bibtex
-@InProceedings{Alama_2026_CVPR,
-  author    = {Alama, Omar and Jariwala, Darshil and Bhattacharya, Avigyan and
-               Kim, Seungchan and Wang, Wenshan and Scherer, Sebastian},
-  title     = {RADSeg: Unleashing Parameter and Compute Efficient Zero-Shot
-               Open-Vocabulary Segmentation Using Agglomerative Models},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and
-               Pattern Recognition (CVPR) Findings},
-  year      = {2026},
-  pages     = {9294--9304}
+@inproceedings{alama2026radseg,
+  title={RADSeg: Unleashing Parameter and Compute Efficient Zero-Shot
+         Open-Vocabulary Segmentation Using Agglomerative Models},
+  author={Alama, Omar and Jariwala, Darshil and Bhattacharya, Avigyan and Kim,
+          Seungchan and Wang, Wenshan and Scherer, Sebastian},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={9294--9304},
+  year={2026}
 }
 ```
 
