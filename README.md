@@ -1,6 +1,6 @@
 # Semantic Search Microservice
 
-> **Part of the [Time Atlas](https://timeatlas.epfl.ch) platform** — an interactive historical-geographical platform integrating spatial and temporal dimensions to make historical records searchable across space and time.
+> **Part of the [Time Atlas](https://timeatlas.eu/) platform** — an interactive historical-geographical platform integrating spatial and temporal dimensions to make historical records searchable across space and time.
 
 This repository contains the Python microservice that powers the multimodal semantic search capability of the Time Atlas platform. It exposes a set of HTTP endpoints for encoding queries (text, images, image regions, and 3D point cloud selections) into dense vector representations, and for rendering score-proportional visual overlays over search results.
 
@@ -169,9 +169,16 @@ Renders a binary cluster mask overlay highlighting the regions corresponding to 
 
 | Model | Role |
 |-------|------|
-| **Talk2DINOv3** | Primary vision-language encoder. Maps text and image inputs into a shared 1024-dimensional embedding space via DINOv3 patch features aligned to language through Talk2DINO. Used for all text, image, and anchor-based query encoding. |
+| **Talk2DINOv3** | Primary encoder for all modalities. Maps text and image inputs into a shared 1024-dimensional embedding space via DINOv3 patch features aligned to language. Used for text encoding, image encoding, and 3D point-level feature extraction. Semantic clustering of image regions is also performed using Talk2DINOv3 patch features. |
 
-Model weights are loaded at service startup. The service requires a CUDA-capable GPU for production inference; CPU fallback is available but significantly slower.
+Model weights are loaded at service startup. The service requires a CUDA-capable GPU for production inference.
+
+### Earlier experimental models (not used in current pipeline)
+ 
+| Model | Notes |
+|-------|-------|
+| **RADSeg** | Region-aware semantic segmentation model evaluated during an earlier phase of the project. Source files retained in the repository for reference; see `radseg/` directory and [Third-party code](#third-party-code) section. |
+| **Perception Encoder (PE) + MiniLM** | Initial patch-based architecture used in the earliest prototype, operating on separate visual and text embedding spaces with Z-Score normalization for score fusion. Superseded by the unified Talk2DINOv3 approach. |
 
 ---
 
